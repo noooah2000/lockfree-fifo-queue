@@ -10,3 +10,5 @@
 make -j
 make run-bench     # 顯示幫助
 make run-tests     # 跑簡單正確性測試
+
+hi
