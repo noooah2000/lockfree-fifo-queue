@@ -1,0 +1,26 @@
+# build outputs
+/build/
+/out/
+/bin/
+
+# our benchmark outputs
+/results/*.csv
+/results/*.png
+/results/*.svg
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# python caches (for scripts/)
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# tooling
+compile_commands.json
+.cache/
