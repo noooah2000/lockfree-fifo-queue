@@ -16,6 +16,7 @@ Thumbs.db
 .vscode/
 .idea/
 
+
 # python caches (for scripts/)
 __pycache__/
 *.pyc
@@ -24,3 +25,4 @@ __pycache__/
 # tooling
 compile_commands.json
 .cache/
+

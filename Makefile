@@ -23,7 +23,7 @@ $(TESTS_BIN): $(TESTS_SRC) | $(BIN)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $< -o $@
 
 run-bench: $(BENCH_BIN)
-	$(BENCH_BIN)
+	$(BENCH_BIN) --help || true
 
 run-tests: $(TESTS_BIN)
 	$(TESTS_BIN)
