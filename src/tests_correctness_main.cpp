@@ -20,7 +20,10 @@ static bool test_linearization(int P=4, int C=4, int K=10000) {
   // 每個 producer 產生 K 筆 (producer_id, seq)
   for (int p=0;p<P;p++) {
     prod.emplace_back([&,p]{
-      for (int i=0;i<K;i++) { while (!q.enqueue(T{p,i})) {} }
+      for (int i=0;i<K;i++) { 
+        while (!q.enqueue(T{p,i})) {}
+        if (i % 100 == 0) q.quiescent(); // 定期呼叫 quiescent 以啟動 SMR
+      }
       if (done.fetch_add(1)+1==P) q.close();
     });
   }
@@ -31,9 +34,11 @@ static bool test_linearization(int P=4, int C=4, int K=10000) {
   for (int c=0;c<C;c++) {
     cons.emplace_back([&,c]{
       T v;
+      int op_count = 0;
       while (true) {
         if (q.try_dequeue(v)) {
           total.fetch_add(1);
+          op_count++;
           auto& rec = seen[c];
           auto it = rec.find(v.first);
           int last = (it==rec.end()? -1 : it->second);
@@ -43,6 +48,7 @@ static bool test_linearization(int P=4, int C=4, int K=10000) {
             std::abort();
           }
           rec[v.first] = v.second;
+          if (op_count % 100 == 0) q.quiescent(); // 定期呼叫 quiescent
         } else if (q.is_closed()) {
           break;
         } else {
