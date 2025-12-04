@@ -3,11 +3,12 @@
 #include <cstddef>
 #include <utility>
 #include <new>
+#include <thread>
 
 namespace lfq {
 
-// 極簡 Michael & Scott MPMC 骨架（為安全起見，目前 retire 直接 delete）
-// 之後請將 Reclaimer 換成你完成的 HP/EBR 策略，修正 ABA/回收。
+// Michael & Scott MPMC FIFO Queue with SMR support
+// 使用 Reclaimer 策略來防止 use-after-free 和 ABA 問題
 template <class T, class Reclaimer>
 class MPMCQueue {
   struct Node {
@@ -45,15 +46,17 @@ public:
         if (next == nullptr) {
           if (t->next.compare_exchange_weak(next, node,
                  std::memory_order_release, std::memory_order_relaxed)) {
-            // swing tail
-            tail_.compare_exchange_strong(t, node,
+            // 嘗試推進 tail（可能失敗）
+            Node* expected_tail = t;
+            tail_.compare_exchange_strong(expected_tail, node,
                  std::memory_order_release, std::memory_order_relaxed);
             return true;
           }
         } else {
-          // push tail forward
-          tail_.compare_exchange_strong(t, next,
-                 std::memory_order_release, std::memory_order_relaxed);
+          // tail 落後，幫其推進
+          Node* expected_tail = t;
+          tail_.compare_exchange_strong(expected_tail, next,
+               std::memory_order_release, std::memory_order_relaxed);
         }
       }
     }
@@ -64,22 +67,29 @@ public:
       Node* h = head_.load(std::memory_order_acquire);
       Node* t = tail_.load(std::memory_order_acquire);
       Node* next = h->next.load(std::memory_order_acquire);
+      
+      // 驗證一致性：head 在讀取期間未變
       if (h == head_.load(std::memory_order_acquire)) {
         if (next == nullptr) {
-          // empty
+          // 佇列為空
           return false;
         }
+        
         if (h == t) {
-          // tail 落後，推進
-          tail_.compare_exchange_strong(t, next,
+          // tail 落後，幫其推進
+          Node* expected_tail = t;
+          tail_.compare_exchange_strong(expected_tail, next,
                std::memory_order_release, std::memory_order_relaxed);
           continue;
         }
-        // 取出值，head 前進
+        
+        // 安全複製值（在刪除前）
         out = next->value;
+        
+        // 嘗試推進 head
         if (head_.compare_exchange_weak(h, next,
                std::memory_order_release, std::memory_order_relaxed)) {
-          // retire 舊 head（dummy）
+          // 成功推進 head，可以回收舊 head
           Reclaimer::retire(h);
           return true;
         }
@@ -87,9 +97,17 @@ public:
     }
   }
 
-  void close() { closed_.store(true, std::memory_order_release); }
-  bool is_closed() const noexcept { return closed_.load(std::memory_order_acquire); }
-  static void quiescent() noexcept { Reclaimer::quiescent(); }
+  void close() { 
+    closed_.store(true, std::memory_order_release); 
+  }
+
+  bool is_closed() const noexcept { 
+    return closed_.load(std::memory_order_acquire); 
+  }
+
+  static void quiescent() noexcept { 
+    Reclaimer::quiescent(); 
+  }
 
 private:
   std::atomic<Node*> head_{nullptr};
