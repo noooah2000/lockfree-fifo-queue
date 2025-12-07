@@ -38,7 +38,7 @@ public:
 
   bool enqueue(const T& v) {
     if (closed_.load(std::memory_order_acquire)) return false;
-    Node* node = new Node(v);
+    Node* node = new Node(v);   // TODO: 有 lock !!!
     for (;;) {
       Node* t = tail_.load(std::memory_order_acquire);
       Node* next = t->next.load(std::memory_order_acquire);
@@ -110,9 +110,10 @@ public:
   }
 
 private:
-  std::atomic<Node*> head_{nullptr};
-  std::atomic<Node*> tail_{nullptr};
-  std::atomic<bool>  closed_{false};
+  // 一般 CPU Cache Line 是 64 bytes
+  alignas(64) std::atomic<Node*> head_{nullptr};
+  alignas(64) std::atomic<Node*> tail_{nullptr};
+  alignas(64) std::atomic<bool>  closed_{false};
 };
 
 } // namespace lfq
