@@ -3,12 +3,12 @@
 #include <mutex>
 #include <atomic>
 
-namespace lfq {
+namespace mpmcq {
 
 template <class T>
-class MPMCQueueMutex {
+class MutexQueue {
 public:
-  explicit MPMCQueueMutex(std::size_t /*capacity_hint*/ = 0) : closed_(false) {}
+  explicit MutexQueue(std::size_t /*capacity_hint*/ = 0) : closed_(false) {}
 
   bool enqueue(const T& v) {
     std::lock_guard<std::mutex> lk(m_);

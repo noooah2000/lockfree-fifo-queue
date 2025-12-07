@@ -7,19 +7,30 @@
 #include <vector>
 #include <mutex>
 
-namespace lfq {
+namespace mpmcq 
+{
 
 template <typename Node> class NodePool;
 
 // Michael & Scott MPMC FIFO Queue with SMR support
-// 使用 Reclaimer 策略來防止 use-after-free 和 ABA 問題
+// using Reclaimer scheme to prevent use-after-free and ABA problems
 template <class T, class Reclaimer>
+<<<<<<< HEAD
 class MPMCQueue {
 public: // 改成 public，讓 Reclaimer 可以存取 Node
   struct Node {
     std::atomic<Node*> next{nullptr};
     T value;
     
+=======
+class LockFreeQueue 
+{
+  struct Node 
+  {
+    std::atomic<Node*> next{nullptr};
+    T value;
+
+>>>>>>> 3b51fd1 (WIP: save work before update)
     explicit Node(const T& v) : next(nullptr), value(v) {}
     Node() : next(nullptr), value() {}
 
@@ -35,16 +46,24 @@ public: // 改成 public，讓 Reclaimer 可以存取 Node
   };
 
 public:
+<<<<<<< HEAD
   explicit MPMCQueue(std::size_t /*cap_hint*/ = 0) {
     // 這裡呼叫 new，會自動走 operator new -> NodePool::alloc
     Node* dummy = new Node();      // 初始 dummy
+=======
+  explicit LockFreeQueue(std::size_t /*cap_hint*/ = 0) 
+  {
+    Node* dummy = new Node();      // init dummy
+>>>>>>> 3b51fd1 (WIP: save work before update)
     head_.store(dummy, std::memory_order_relaxed);
     tail_.store(dummy, std::memory_order_relaxed);
     closed_.store(false, std::memory_order_relaxed);
   }
 
-  ~MPMCQueue() {
+  ~LockFreeQueue() 
+  {
     // 清空殘留節點
+<<<<<<< HEAD
     Node* n = head_.load(std::memory_order_relaxed);
     while (n) {
       Node* nxt = n->next.load(std::memory_order_relaxed);
@@ -74,58 +93,126 @@ public:
             Node* expected_tail = t;
             tail_.compare_exchange_strong(expected_tail, node,
                  std::memory_order_release, std::memory_order_relaxed);
+=======
+    Node* curr_node = head_.load(std::memory_order_relaxed);
+    while (node) 
+    {
+      Node* next_node = curr_node->next.load(std::memory_order_relaxed);
+      delete curr_node;
+      curr_node = next_node;
+    }
+  }
+
+  bool enqueue(const T& v) 
+  {
+    if (is_closed()) return false;
+    Node* new_node = new Node(v);
+
+    for (;;) 
+    {
+      Node* curr_tail = tail_.load(std::memory_order_acquire);
+      Node* tail_next = curr_tail->next.load(std::memory_order_acquire);
+
+      if (is_closed()) {delete new_node; return false;}
+
+      if (curr_tail == tail_.load(std::memory_order_acquire)) 
+      {
+        if (tail_next == nullptr) 
+        {
+          if (curr_tail->next.compare_exchange_weak(tail_next, 
+                                                    new_node,
+                                                    std::memory_order_release, 
+                                                    std::memory_order_relaxed)) 
+          {
+            // update tail
+            Node* expected_tail = curr_tail;
+            tail_.compare_exchange_strong(expected_tail, 
+                                          new_node,
+                                          std::memory_order_release, 
+                                          std::memory_order_relaxed);
+>>>>>>> 3b51fd1 (WIP: save work before update)
             return true;
           }
-        } else {
-          // tail 落後，幫其推進
-          Node* expected_tail = t;
-          tail_.compare_exchange_strong(expected_tail, next,
-               std::memory_order_release, std::memory_order_relaxed);
+        } 
+        else 
+        {
+          // update tail
+          Node* expected_tail = curr_tail;
+          tail_.compare_exchange_strong(expected_tail, 
+                                        tail_next,
+                                        std::memory_order_release, 
+                                        std::memory_order_relaxed);
         }
       }
     }
   }
 
-  bool try_dequeue(T& out) {
-    for (;;) {
-      Node* h = head_.load(std::memory_order_acquire);
-      Node* t = tail_.load(std::memory_order_acquire);
-      Node* next = h->next.load(std::memory_order_acquire);
+  bool try_dequeue(T& out) 
+  {
+    for (;;) 
+    {
+      Node* curr_head = head_.load(std::memory_order_acquire);
+      Node* curr_tail = tail_.load(std::memory_order_acquire);
+      Node* head_next = curr_head->next.load(std::memory_order_acquire);
       
-      // 驗證一致性：head 在讀取期間未變
-      if (h == head_.load(std::memory_order_acquire)) {
-        if (next == nullptr) {
-          // 佇列為空
-          return false;
-        }
-        
-        if (h == t) {
-          // tail 落後，幫其推進
-          Node* expected_tail = t;
-          tail_.compare_exchange_strong(expected_tail, next,
-               std::memory_order_release, std::memory_order_relaxed);
+      if (curr_head == head_.load(std::memory_order_acquire)) 
+      {
+        if (head_next == nullptr) return false; // queue is empty
+
+        if (curr_head == curr_tail) // there is a producer that haven't updated the tial
+        {
+          // consumer help updating the tail
+          Node* expected_tail = curr_tail;
+          tail_.compare_exchange_strong(expected_tail, 
+                                        head_next,
+                                        std::memory_order_release, 
+                                        std::memory_order_relaxed);
           continue;
         }
         
         // 安全複製值（在刪除前）
-        out = next->value;
+        out = head_next->value;
         
-        // 嘗試推進 head
-        if (head_.compare_exchange_weak(h, next,
-               std::memory_order_release, std::memory_order_relaxed)) {
+        // update head
+        if (head_.compare_exchange_weak(curr_head, 
+                                        head_next,
+                                        std::memory_order_release, 
+                                        std::memory_order_relaxed)) 
+        {
           // 成功推進 head，可以回收舊 head
+<<<<<<< HEAD
           // Reclaimer 內部會呼叫 delete h
           // 因為重載了 operator delete，所以會自動歸還給 Pool
           Reclaimer::retire(h);
+=======
+          Reclaimer::retire(curr_head);
+>>>>>>> 3b51fd1 (WIP: save work before update)
           return true;
         }
       }
     }
   }
 
+<<<<<<< HEAD
   void close() { closed_.store(true, std::memory_order_release); }
   bool is_closed() const noexcept { return closed_.load(std::memory_order_acquire); }
   static void quiescent() noexcept { Reclaimer::quiescent(); }
+=======
+  void close() 
+  { 
+    closed_.store(true, std::memory_order_release); 
+  }
+
+  bool is_closed() const noexcept 
+  { 
+    return closed_.load(std::memory_order_acquire); 
+  }
+
+  static void quiescent() noexcept 
+  { 
+    Reclaimer::quiescent(); 
+  }
+>>>>>>> 3b51fd1 (WIP: save work before update)
 
 private:
   // 一般 CPU Cache Line 是 64 bytes
@@ -134,6 +221,7 @@ private:
   alignas(64) std::atomic<bool>  closed_{false};
 };
 
+<<<<<<< HEAD
 // Object Pool 實作 (解決 new 的 Malloc 瓶頸)
 template <typename Node>
 class NodePool {
@@ -202,3 +290,6 @@ template <typename Node>
 std::vector<Node*> NodePool<Node>::global_pool;
 
 } // namespace lfq
+=======
+} // namespace mpmcq 
+>>>>>>> 3b51fd1 (WIP: save work before update)
