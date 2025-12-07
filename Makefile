@@ -1,9 +1,10 @@
 # Minimal Makefile: build two executables
 CXX      ?= g++
-CXXFLAGS ?= -std=c++20 -O2 -pthread
+CXXFLAGS ?= -std=c++20 -O3 -pthread
 INCLUDES := -Iinclude
 
 BIN       := build
+RESULT    := results
 BENCH_SRC := src/benchmark_main.cpp
 TESTS_SRC := src/tests_correctness_main.cpp
 BENCH_BIN := $(BIN)/bench_queue
@@ -30,3 +31,4 @@ run-tests: $(TESTS_BIN)
 
 clean:
 	rm -rf $(BIN)
+	rm -rf $(RESULT)

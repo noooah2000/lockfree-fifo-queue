@@ -16,6 +16,8 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import numpy as np
 
+PLAYLOAD = 4
+
 def load_results():
     """Load all CSV results into memory."""
     rows = []
@@ -42,8 +44,8 @@ def parse_row(r):
 
 def plot_threads_vs_metrics(rows):
     """Plot (Threads, Throughput), (Threads, Tail Latency), (Threads, Memory Peak)."""
-    # Group by impl and fixed payload (100us)
-    fixed_payload = 100
+    # Group by impl and fixed payload
+    fixed_payload = PLAYLOAD
     series = defaultdict(list)  # impl -> list of (threads, metric)
     
     for r in rows:
@@ -67,7 +69,7 @@ def plot_threads_vs_metrics(rows):
         ax.plot([x[0] for x in pts], [x[1] for x in pts], marker='o', label=impl, linewidth=2)
     ax.set_xlabel('Threads (P=C)', fontsize=11)
     ax.set_ylabel('Throughput (ops/s)', fontsize=11)
-    ax.set_title('Throughput vs Threads\n(payload=100μs)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Throughput vs Threads\n(payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
@@ -78,7 +80,7 @@ def plot_threads_vs_metrics(rows):
         ax.plot([x[0] for x in pts], [x[2] for x in pts], marker='s', label=impl, linewidth=2)
     ax.set_xlabel('Threads (P=C)', fontsize=11)
     ax.set_ylabel('Max Depth (queue depth)', fontsize=11)
-    ax.set_title('Tail Latency vs Threads\n(payload=100μs)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Tail Latency vs Threads\n(payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
@@ -91,7 +93,7 @@ def plot_threads_vs_metrics(rows):
         ax.plot([x[0] for x in pts], [x[2] for x in pts], marker='^', label=impl, linewidth=2)
     ax.set_xlabel('Threads (P=C)', fontsize=11)
     ax.set_ylabel('Memory Peak (estimated)', fontsize=11)
-    ax.set_title('Memory Peak vs Threads\n(payload=100μs)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Memory Peak vs Threads\n(payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
@@ -102,8 +104,8 @@ def plot_threads_vs_metrics(rows):
 
 def plot_payload_vs_metrics(rows):
     """Plot (Payload, Throughput), (Payload, Tail Latency), (Payload, Memory Peak)."""
-    # Group by impl and fixed threads (P=2, C=2)
-    fixed_threads = 2
+    # Group by impl and fixed threads (P=8, C=8)
+    fixed_threads = 8
     series = defaultdict(list)  # impl -> list of (payload, metric)
     
     for r in rows:
@@ -127,7 +129,7 @@ def plot_payload_vs_metrics(rows):
         ax.plot([x[0] for x in pts], [x[1] for x in pts], marker='o', label=impl, linewidth=2)
     ax.set_xlabel('Payload (μs)', fontsize=11)
     ax.set_ylabel('Throughput (ops/s)', fontsize=11)
-    ax.set_title('Throughput vs Payload\n(P=2, C=2)', fontsize=12, fontweight='bold')
+    ax.set_title('Throughput vs Payload\n(P=8, C=8)', fontsize=12, fontweight='bold')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
@@ -138,7 +140,7 @@ def plot_payload_vs_metrics(rows):
         ax.plot([x[0] for x in pts], [x[2] for x in pts], marker='s', label=impl, linewidth=2)
     ax.set_xlabel('Payload (μs)', fontsize=11)
     ax.set_ylabel('Max Depth (queue depth)', fontsize=11)
-    ax.set_title('Tail Latency vs Payload\n(P=2, C=2)', fontsize=12, fontweight='bold')
+    ax.set_title('Tail Latency vs Payload\n(P=8, C=8)', fontsize=12, fontweight='bold')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
@@ -149,7 +151,7 @@ def plot_payload_vs_metrics(rows):
         ax.plot([x[0] for x in pts], [x[2] for x in pts], marker='^', label=impl, linewidth=2)
     ax.set_xlabel('Payload (μs)', fontsize=11)
     ax.set_ylabel('Memory Peak (estimated)', fontsize=11)
-    ax.set_title('Memory Peak vs Payload\n(P=2, C=2)', fontsize=12, fontweight='bold')
+    ax.set_title('Memory Peak vs Payload\n(P=8, C=8)', fontsize=12, fontweight='bold')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
@@ -160,12 +162,12 @@ def plot_payload_vs_metrics(rows):
 
 def plot_implementation_comparison(rows):
     """Create side-by-side bar chart comparing all implementations."""
-    # Filter for P=2, C=2, payload=100us
+    # Filter for P=8, C=8, payload=PLAYLOAD us
     filtered = [r for r in rows 
-                if r['P'] == 2 and r['C'] == 2 and r['payload_us'] == 100]
+                if r['P'] == 8 and r['C'] == 8 and r['payload_us'] == PLAYLOAD]
     
     if not filtered:
-        print("⚠ No data for implementation comparison (P=2, C=2, payload=100μs)")
+        print(f"⚠ No data for implementation comparison (P=8, C=8, payload={PLAYLOAD}μs)")
         return
     
     impls = sorted(set(r['impl'] for r in filtered))
@@ -179,7 +181,7 @@ def plot_implementation_comparison(rows):
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
     ax.bar(impls, throughputs, color=colors[:len(impls)], alpha=0.8, edgecolor='black', linewidth=1.5)
     ax.set_ylabel('Throughput (ops/s)', fontsize=11)
-    ax.set_title('Throughput Comparison\n(P=2, C=2, payload=100μs)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Throughput Comparison\n(P=8, C=8, payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
     ax.grid(True, axis='y', alpha=0.3)
     
     # Add value labels on bars
@@ -190,7 +192,7 @@ def plot_implementation_comparison(rows):
     ax = axes[1]
     ax.bar(impls, max_depths, color=colors[:len(impls)], alpha=0.8, edgecolor='black', linewidth=1.5)
     ax.set_ylabel('Max Depth', fontsize=11)
-    ax.set_title('Max Depth Comparison\n(P=2, C=2, payload=100μs)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Max Depth Comparison\n(P=8, C=8, payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
     ax.grid(True, axis='y', alpha=0.3)
     
     # Add value labels on bars
@@ -232,7 +234,7 @@ def generate_summary_table(rows):
         # Thread scaling efficiency (if we have thread data)
         thread_data = defaultdict(list)
         for r in results:
-            if r['payload_us'] == 100:
+            if r['payload_us'] == PLAYLOAD:
                 thread_data[r['P']].append(r)
         
         if len(thread_data) > 1:
