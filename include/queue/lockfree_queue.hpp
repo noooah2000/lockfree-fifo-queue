@@ -15,6 +15,32 @@ template <typename Node> class NodePool;
 // 使用 Reclaimer 策略來防止 use-after-free 和 ABA 問題
 template <class T, class Reclaimer>
 class MPMCQueue {
+struct Backoff {
+    int count = 1;
+    // 限制最大等待時間，避免睡太久
+    static constexpr int MAX_YIELD = 64; 
+    void snooze() {
+#ifdef LFQ_USE_BACKOFF // 只有定義了 Backoff 才執行
+        if (count <= MAX_YIELD) {
+            // CPU 指令：告訴 CPU 我在自旋，可以省電或調度資源
+            // 相當於 loop 中的 no-op，但更有效率
+            for (int i = 0; i < count; ++i) {
+               // GCC/Clang 內建，Intel 則是 _mm_pause()
+               #if defined(__x86_64__) || defined(__i386__)
+                    __builtin_ia32_pause();
+                #elif defined(__aarch64__)
+                    asm volatile("yield");
+                #endif
+            }
+            count *= 2;
+        } else {
+            // 如果真的搶太兇，就讓出 Time Slice
+            std::this_thread::yield();
+            count = 1; // 重置
+        }
+#endif // LFQ_USE_BACKOFF
+    }
+};
 public: // 改成 public，讓 Reclaimer 可以存取 Node
   struct Node {
     std::atomic<Node*> next{nullptr};
@@ -25,6 +51,7 @@ public: // 改成 public，讓 Reclaimer 可以存取 Node
 
     // 重載 new/delete，讓所有透過 new/delete 的操作自動走 Object Pool
     // 這讓 Reclaimer (EBR/HP) 不需要修改程式碼就能享受到 Pool 的加速
+#ifdef LFQ_USE_NODEPOOL // 只有定義了 NodePool 才使用重載
     void* operator new(size_t) {
         return NodePool<Node>::alloc();
     }
@@ -32,6 +59,7 @@ public: // 改成 public，讓 Reclaimer 可以存取 Node
     void operator delete(void* p) {
         NodePool<Node>::free(static_cast<Node*>(p));
     }
+#endif // LFQ_USE_NODEPOOL
   };
 
 public:
@@ -59,9 +87,8 @@ public:
     // 用標準寫法，因為我們重載了 new，它底層已經是 Pool 了
     // 這樣寫程式碼更乾淨，且與標準 M&S 演算法一致
     Node* node = new Node(v);
-    // 或是
-    // Node* node = NodePool<Node>::alloc();
-    // new (node) Node(v); // Placement new
+
+    Backoff backoff; // 初始化 Backoff
 
     for (;;) {
       Node* t = tail_.load(std::memory_order_acquire);
@@ -83,10 +110,13 @@ public:
                std::memory_order_release, std::memory_order_relaxed);
         }
       }
+      // CAS 失敗或 Tail 被推走了，休息一下再試
+      backoff.snooze();
     }
   }
 
   bool try_dequeue(T& out) {
+    Backoff backoff; // 初始化 Backoff
     for (;;) {
       Node* h = head_.load(std::memory_order_acquire);
       Node* t = tail_.load(std::memory_order_acquire);
@@ -104,6 +134,7 @@ public:
           Node* expected_tail = t;
           tail_.compare_exchange_strong(expected_tail, next,
                std::memory_order_release, std::memory_order_relaxed);
+          backoff.snooze(); // 幫忙推完後，也休息一下
           continue;
         }
         
@@ -120,6 +151,8 @@ public:
           return true;
         }
       }
+      // CAS 失敗，休息一下
+      backoff.snooze();
     }
   }
 
