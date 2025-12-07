@@ -12,17 +12,18 @@ fi
 
 impls=("hp" "ebr" "none" "mutex")
 threads=(1 2 4 8 10)
-payloads=(1 2 3 4 5 6 7 8 9 10)
+fixed_playload=4
+payloads=(0 1 2 3 4 5)
 duration=5
 warmup=2
 
-# 測試不同執行緒數 (固定 payload=5us)
-echo "Testing different thread counts (payload=5us)..."
+# 測試不同執行緒數 (固定 payload=fixed_playload us)
+echo "Testing different thread counts (payload=$fixed_playload us)..."
 for impl in "${impls[@]}"; do
   for t in "${threads[@]}"; do
-    csv="results/${impl}_p${t}_c${t}_5us.csv"
+    csv="results/${impl}_p${t}_c${t}_${fixed_playload}us.csv"
     "$BIN" --impl "$impl" --producers "$t" --consumers "$t" \
-      --payload-us 5 --duration "$duration" --warmup "$warmup" \
+      --payload-us "$fixed_playload" --duration "$duration" --warmup "$warmup" \
       --csv "$csv"
     echo "  ✓ $impl P=$t C=$t"
   done
