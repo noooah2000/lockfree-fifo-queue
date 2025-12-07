@@ -11,7 +11,7 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 impls=("hp" "ebr" "none" "mutex")
-threads=(1 2 4 8 10)
+threads=(1 2 4 6 8 10)
 fixed_playload=4
 payloads=(0 1 2 3 4 5)
 duration=5

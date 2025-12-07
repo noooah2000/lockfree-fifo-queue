@@ -35,22 +35,30 @@ namespace mpmcq
 
 struct SimpleBackoff 
 {
-    int n = 0;
+    // 把單純 ++n 改成指數 backoff，避免每個 threads 重試的頻率一樣而造成 bus 壅擠
+    int n = 1;
+    static constexpr int MAX_YIELD = 64; 
     inline void pause() noexcept 
     {
-        if (++n < 16) 
+#ifdef LFQ_USE_BACKOFF // 只有定義了 Backoff 才執行
+        if (n <= MAX_YIELD) 
         {
-            cpu_relax();
+            for (int i = 0; i < n; ++i) {
+                cpu_relax();
+            }
+            n *= 2;
         } 
         else 
         {
+            // 如果真的搶太兇，就讓出 Time Slice
             std::this_thread::yield();
-            n = 0;
+            n = 1;
         }
+#endif // LFQ_USE_BACKOFF
     }
 };
 
-// [Fix] 必須將 NodePool 定義在 LockFreeQueue 之前，否則編譯器找不到
+// 必須將 NodePool 定義在 LockFreeQueue 之前，否則編譯器找不到
 template <typename Node>
 class NodePool {
 public:
@@ -129,6 +137,7 @@ class LockFreeQueue
         Node() : next(nullptr), value() {}
 
         // 重載 new/delete 使用 NodePool
+#ifdef LFQ_USE_NODEPOOL // 只有定義了 NodePool 才使用重載
         void* operator new(size_t) 
         {
             return NodePool<Node>::allocate();
@@ -138,6 +147,7 @@ class LockFreeQueue
         {
             NodePool<Node>::deallocate(static_cast<Node*>(p));
         }
+#endif // LFQ_USE_NODEPOOL
     };
 
 public:
@@ -182,6 +192,7 @@ public:
                                                               std::memory_order_release, 
                                                               std::memory_order_relaxed)) 
                     {
+                        // 嘗試推進 tail（可能失敗）
                         Node* expected_tail = curr_tail;
                         (void)tail_.compare_exchange_strong(expected_tail, 
                                                             new_node,
@@ -192,6 +203,7 @@ public:
                 } 
                 else 
                 {
+                    // tail 落後，幫其推進
                     Node* expected_tail = curr_tail;
                     tail_.compare_exchange_strong(expected_tail, 
                                                   tail_next,
@@ -212,12 +224,15 @@ public:
             Node* curr_tail = tail_.load(std::memory_order_acquire);
             Node* head_next = curr_head->next.load(std::memory_order_acquire);
             
+            // 驗證一致性：head 在讀取期間未變
             if (curr_head == head_.load(std::memory_order_acquire)) 
             {
+                // 佇列為空
                 if (head_next == nullptr) return false;
 
                 if (curr_head == curr_tail) 
                 {
+                    // tail 落後，幫其推進
                     Node* expected_tail = curr_tail;
                     (void)tail_.compare_exchange_strong(expected_tail, 
                                                         head_next,
@@ -229,14 +244,17 @@ public:
                 
                 out = head_next->value;
                 
+                // 嘗試推進 head
                 if (head_.compare_exchange_weak(curr_head, 
                                                 head_next,
                                                 std::memory_order_release, 
                                                 std::memory_order_relaxed)) 
                 {
+                    // 成功推進 head，可以回收舊 head
                     Reclaimer::retire(curr_head);
                     return true;
                 }
+                // CAS 失敗，休息一下
                 bk.pause();
             }
         }

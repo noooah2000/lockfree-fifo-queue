@@ -156,9 +156,9 @@ static void run_benchmark(const BenchmarkArgs& args, const char* impl_name)
 
     // 正式量測區間
     long long dequeue_start = dequeue_count.load();
+    std::cout << "Running benchmark for " << args.duration_s << "s..." << std::endl;
     auto time_start = Clock::now();
     
-    std::cout << "Running benchmark for " << args.duration_s << "s..." << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(args.duration_s));
     
     auto time_end = Clock::now();
