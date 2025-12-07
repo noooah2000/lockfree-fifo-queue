@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <cassert>
 
-namespace lfq::reclaimer {
+namespace mpmcq::reclaimer {
 
 // [優化2] 增大閾值：從 100 改為 256 或更高
 // 讓每次掃描的開銷被更多節點分攤
@@ -214,4 +214,4 @@ struct epoch_based_reclamation {
     }
 };
 
-} // namespace lfq::reclaimer
+} // namespace mpmcq::reclaimer

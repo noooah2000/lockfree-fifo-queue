@@ -4,7 +4,7 @@
 #include <thread>
 #include <chrono>
 
-namespace lfq::reclaimer {
+namespace mpmcq::reclaimer {
 
 // 先行安全版：直接 delete，無 SMR。作為 bring-up / None 策略。
 // 改進：加入簡單的延遲回收機制以減少 ABA 問題
@@ -44,4 +44,4 @@ struct no_reclamation {
 
 thread_local std::vector<void*> no_reclamation::retire_buffer;
 
-} // namespace lfq::reclaimer
+} // namespace mpmcq::reclaimer
