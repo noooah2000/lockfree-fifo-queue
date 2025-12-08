@@ -16,14 +16,18 @@ constexpr int HP_COUNT_PER_THREAD = 3;
 constexpr int HP_RETIRE_THRESHOLD = 128; 
 
 // Hazard Pointer Record (每個執行緒擁有一份，但掛在全域鏈表上)
-struct alignas(64) HPRecType {
+struct alignas(64) HPRecType 
+{
     std::atomic<void*> hp[HP_COUNT_PER_THREAD];
     std::atomic<bool> active{false};
     HPRecType* next{nullptr};
 
-    HPRecType() {
+    HPRecType() 
+    {
         for (int i = 0; i < HP_COUNT_PER_THREAD; ++i)
+        {
             hp[i].store(nullptr, std::memory_order_relaxed);
+        }
     }
 };
 
@@ -37,7 +41,8 @@ public:
     }
 
     // 待回收節點的封裝
-    struct RetiredNode {
+    struct RetiredNode 
+    {
         void* ptr;
         void (*deleter)(void*); // 存儲刪除函數，確保能呼叫到 Object Pool 的 operator delete
     };
@@ -48,12 +53,15 @@ public:
         HPRecType* my_rec = nullptr;    // 指向全域鏈表中的自己的 Record
         std::vector<RetiredNode> retire_list; 
 
-        ThreadContext(HazardPointerManager& mgr) {
+        ThreadContext(HazardPointerManager& mgr) 
+        {
             my_rec = mgr.acquire_record();
         }
 
-        ~ThreadContext() {
-            if (my_rec) {
+        ~ThreadContext() 
+        {
+            if (my_rec) 
+            {
                 // 執行緒結束時，釋放 Record 讓別人用
                 // 注意：這裡我們不清理 retire_list，嚴格來說這些垃圾會洩漏。
                 // 在正式實作中應該把這些節點轉移到全域孤兒列表 (Global Orphan List)。
@@ -75,7 +83,7 @@ public:
         auto &ctx = get_context();
         if (idx < HP_COUNT_PER_THREAD)
         {
-            ctx.my_rec->hp[idx].store(ptr, std::memory_order_release);
+            ctx.my_rec->hp[idx].store(ptr, std::memory_order_seq_cst);
         }
     }
 
@@ -218,7 +226,8 @@ struct hazard_pointers
     // 核心功能：設置 Hazard Pointer
     static void protect_at(int idx, void *ptr) noexcept
     {
-        HazardPointerManager::instance().protect(idx, ptr);
+        if (ptr) HazardPointerManager::instance().protect(idx, ptr);
+        else HazardPointerManager::instance().clear(idx);
     }
 };
 
