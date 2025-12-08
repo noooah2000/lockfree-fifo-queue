@@ -35,22 +35,30 @@ namespace mpmcq
 
 struct SimpleBackoff 
 {
-    int n = 0;
+    // 把單純 ++n 改成指數 backoff，避免每個 threads 重試的頻率一樣而造成 bus 壅擠
+    int n = 1;
+    static constexpr int MAX_YIELD = 64; 
     inline void pause() noexcept 
     {
-        if (++n < 16) 
+#ifdef LFQ_USE_BACKOFF // 只有定義了 Backoff 才執行
+        if (n <= MAX_YIELD) 
         {
-            cpu_relax();
+            for (int i = 0; i < n; ++i) {
+                cpu_relax();
+            }
+            n *= 2;
         } 
         else 
         {
+            // 如果真的搶太兇，就讓出 Time Slice
             std::this_thread::yield();
-            n = 0;
+            n = 1;
         }
+#endif // LFQ_USE_BACKOFF
     }
 };
 
-// [Fix] 必須將 NodePool 定義在 LockFreeQueue 之前，否則編譯器找不到
+// 必須將 NodePool 定義在 LockFreeQueue 之前，否則編譯器找不到
 template <typename Node>
 class NodePool {
 public:
@@ -129,6 +137,7 @@ class LockFreeQueue
         Node() : next(nullptr), value() {}
 
         // 重載 new/delete 使用 NodePool
+#ifdef LFQ_USE_NODEPOOL // 只有定義了 NodePool 才使用重載
         void* operator new(size_t) 
         {
             return NodePool<Node>::allocate();
@@ -138,6 +147,7 @@ class LockFreeQueue
         {
             NodePool<Node>::deallocate(static_cast<Node*>(p));
         }
+#endif // LFQ_USE_NODEPOOL
     };
 
 public:
@@ -182,6 +192,7 @@ public:
                                                               std::memory_order_release, 
                                                               std::memory_order_relaxed)) 
                     {
+                        // 嘗試推進 tail（可能失敗）
                         Node* expected_tail = curr_tail;
                         (void)tail_.compare_exchange_strong(expected_tail, 
                                                             new_node,
@@ -192,6 +203,7 @@ public:
                 } 
                 else 
                 {
+                    // tail 落後，幫其推進
                     Node* expected_tail = curr_tail;
                     tail_.compare_exchange_strong(expected_tail, 
                                                   tail_next,
@@ -203,42 +215,68 @@ public:
         }
     }
 
-    bool try_dequeue(T& out) 
+    bool try_dequeue(T& out)
     {
         SimpleBackoff bk;
-        for (;;) 
+        for (;;)
         {
             Node* curr_head = head_.load(std::memory_order_acquire);
+            
+            // [HP 關鍵步驟 1] 先掛上 Hazard Pointer 保護 curr_head
+            Reclaimer::protect_at(0, curr_head);
+
+            // [HP 關鍵步驟 2] 記憶體屏障 (Memory Fence)，確保 protect 指令先執行
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+
+            // [HP 關鍵步驟 3] 再次檢查 head 是否改變
+            // 如果 head 已經變了，代表 curr_head 可能已經被別人 pop 並且 delete 掉了
+            // 這時候我們的保護可能太晚了，必須重來
+            if (curr_head != head_.load(std::memory_order_acquire))
+            {
+                // 失敗重試前，不需要清除保護，下次迴圈會覆蓋
+                continue; 
+            }
+
             Node* curr_tail = tail_.load(std::memory_order_acquire);
             Node* head_next = curr_head->next.load(std::memory_order_acquire);
             
-            if (curr_head == head_.load(std::memory_order_acquire)) 
+            // 注意：這裡 next 也要保護嗎？
+            // M&S Queue 的演算法特性是只要保護 Head 即可安全讀取 next
+            // 因為如果 Head 沒變，Head 節點就不會被釋放，next 也就是安全的。
+            
+            if (head_next == nullptr)
             {
-                if (head_next == nullptr) return false;
-
-                if (curr_head == curr_tail) 
-                {
-                    Node* expected_tail = curr_tail;
-                    (void)tail_.compare_exchange_strong(expected_tail, 
-                                                        head_next,
-                                                        std::memory_order_release, 
-                                                        std::memory_order_relaxed);
-                    bk.pause();
-                    continue;
-                }
-                
-                out = head_next->value;
-                
-                if (head_.compare_exchange_weak(curr_head, 
-                                                head_next,
-                                                std::memory_order_release, 
-                                                std::memory_order_relaxed)) 
-                {
-                    Reclaimer::retire(curr_head);
-                    return true;
-                }
-                bk.pause();
+                Reclaimer::protect_at(0, nullptr); // 離開前清除保護
+                return false;
             }
+            
+            if (curr_head == curr_tail)
+            {
+                Node* expected_tail = curr_tail;
+                tail_.compare_exchange_strong(expected_tail, 
+                                              head_next, 
+                                              std::memory_order_release, 
+                                              std::memory_order_relaxed);
+                bk.pause();
+                Reclaimer::protect_at(0, nullptr); // 重試前清除保護(雖然不清除也行，但習慣好)
+                continue;
+            }
+            
+            out = head_next->value;
+            
+            if (head_.compare_exchange_weak(curr_head, 
+                                            head_next, 
+                                            std::memory_order_release, 
+                                            std::memory_order_relaxed))
+            {            
+                // 成功推進 head，可以回收舊 head
+                Reclaimer::protect_at(0, nullptr); // 成功 dequeue，自己不用保護了
+                Reclaimer::retire(curr_head);              // 丟給回收員
+                return true;
+            }
+            
+            // 迴圈重試，protect_at 會在開頭重設
+            bk.pause();
         }
     }
 

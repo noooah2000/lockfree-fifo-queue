@@ -212,6 +212,8 @@ struct epoch_based_reclamation {
         // 這樣即使 scan 失敗（沒搶到鎖），只要 Global Epoch 被別人推動了，我就能回收
         mgr.attempt_local_cleanup(); 
     }
+
+    static void protect_at(int, void*) {}   // 對齊 HP 實作
 };
 
 } // namespace mpmcq::reclaimer

@@ -1,7 +1,21 @@
 # Minimal Makefile: build two executables
 CXX      ?= g++
-CXXFLAGS ?= -std=c++20 -O3 -pthread
+CXXFLAGS ?= -std=c++20 -O3 -pthread -latomic
 INCLUDES := -Iinclude
+
+# 用戶可選參數，預設為 0 (不開啟)
+# 使用方式: make ENABLE_POOL=1 ENABLE_BACKOFF=1
+ENABLE_POOL    ?= 0
+ENABLE_BACKOFF ?= 0
+
+# 根據參數追加 CXXFLAGS
+ifeq ($(ENABLE_POOL), 1)
+	CXXFLAGS += -DLFQ_USE_NODEPOOL
+endif
+
+ifeq ($(ENABLE_BACKOFF), 1)
+	CXXFLAGS += -DLFQ_USE_BACKOFF
+endif
 
 BIN       := build
 RESULT    := results
