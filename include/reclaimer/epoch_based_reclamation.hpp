@@ -9,11 +9,7 @@
 
 namespace mpmcq::reclaimer 
 {
-
-// [優化2] 增大閾值：從 100 改為 256 或更高
-// 讓每次掃描的開銷被更多節點分攤
-// constexpr int EBR_RETIRE_THRESHOLD = 256;
-constexpr int EBR_RETIRE_THRESHOLD = 4096;
+constexpr int EBR_RETIRE_THRESHOLD = 512;
 
 class EpochBasedReclaimationManager 
 {
@@ -32,8 +28,7 @@ public:
 
     struct ThreadContext 
     {
-        // [優化3] 調整記憶體對齊，避免 False Sharing
-        // 讓 active 和 local_epoch 處於不同的 Cache Line
+        // 讓 active 和 local_epoch 處於不同的 Cache Line 避免 False Sharing
         alignas(64) std::atomic<size_t> local_epoch{0};
         alignas(64) std::atomic<bool> active{false};
         
@@ -70,9 +65,9 @@ public:
     void enter_critical() noexcept 
     {
         auto& ctx = get_context();
-        // 先更新 Epoch (用 relaxed 即可)
+        // 先更新 Epoch
         ctx.local_epoch.store(global_epoch_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        // 再宣告自己 Active (用 seq_cst 當作柵欄，確保別人看到 Active 時，Epoch 已經是最新的)
+        // 再宣告自己 Active
         ctx.active.store(true, std::memory_order_seq_cst);
     }
 
@@ -117,14 +112,10 @@ public:
 
     void scan_and_retire() noexcept 
     {
-        // [優化1] 使用 try_lock 代替 lock
-        // 如果有人正在掃描，我們就不掃了，直接返回。
-        // 這避免了所有執行緒卡在這裡排隊。
+        // 如果有人正在掃描，我們就不掃了，直接返回。這避免了所有執行緒卡在這裡排隊。
         std::unique_lock<std::mutex> lock(list_mtx_, std::try_to_lock);
         if (!lock.owns_lock()) return;
 
-        // --- 以下邏輯只有持有鎖的單一執行緒會執行 ---
-        
         size_t snapshot_epoch = global_epoch_.load(std::memory_order_acquire);
         bool can_advance = true;
         

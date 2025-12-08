@@ -251,7 +251,7 @@ public:
             Reclaimer::protect_at(0, curr_head);
 
             // [HP 關鍵步驟 2] 記憶體屏障 (Memory Fence)，確保 protect 指令先執行
-            std::atomic_thread_fence(std::memory_order_seq_cst);
+            //std::atomic_thread_fence(std::memory_order_seq_cst); (protect改memory_order_seq_cst了 所以這邊可以不用)
 
             // [HP 關鍵步驟 3] 再次檢查 head 是否改變
             // 如果 head 已經變了，代表 curr_head 可能已經被別人 pop 並且 delete 掉了
