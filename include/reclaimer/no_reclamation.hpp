@@ -1,52 +1,48 @@
 #pragma once
+#include <cstddef>
+#include <vector>
+#include <thread>
+#include <chrono>
 
-/**
- * 1. Memory Leak (Default):
- *      不 delete:
- *          作為 Baseline，解釋了 "Cost of Malloc"
- *          (Pool 耗盡後被迫頻繁呼叫系統 malloc，撞上全域鎖與 System Call 瓶頸)
- * 2. Unsafe Reuse (有 ABA 問題):
- *      有 delete, 有 delete 多載:
- *          啟用 Object Pool 機制。記憶體被回收至 User-Space 的 Pool 而非還給 OS，
- *          大幅減少 malloc/free 鎖競爭，並最大化 Cache Locality (熱資料重用)。
- * 3. System Free:
- *      有 delete, 無 delete 多載:
- *          最慢的情境。繞過 Pool 直接呼叫系統 free。
- *          每次 Enqueue/Dequeue 都觸發 OS 記憶體管理器的 Global Lock 競爭，
- *          導致嚴重的 Scalability 崩潰 (比 "不 delete" 還慢，因為多了 free 的開銷)。
- */
+namespace lfq::reclaimer {
 
-namespace mpmcq::reclaimer
-{
+// 先行安全版：直接 delete，無 SMR。作為 bring-up / None 策略。
+// 改進：加入簡單的延遲回收機制以減少 ABA 問題
+struct no_reclamation {
+  struct token { };               // 每執行緒上下文（此策略不需要）
 
-    struct no_reclamation
-    {
-        struct token
-        {
-        };
+  static thread_local std::vector<void*> retire_buffer;
+  static constexpr int RETIRE_BUFFER_SIZE = 100;
 
-        // 不需要任何狀態，不需要 thread_local buffer
+  static void quiescent() noexcept {
+    // 檢查緩衝區，延遲回收
+    if (retire_buffer.size() > RETIRE_BUFFER_SIZE) {
+      // 執行延遲回收（這是一個簡單啟發式方法，
+      // 不如真正的 SMR，但減少立即 use-after-free 的風險）
+      auto old_buffer = retire_buffer;
+      retire_buffer.clear();
+      
+      // 給其他執行緒一點時間清理
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+      
+      for (void* p : old_buffer) {
+        delete[] static_cast<char*>(p);
+      }
+    }
+  }
 
-        static void quiescent() noexcept
-        {
-            // 空實作
-        }
+  static token enter() noexcept { return {}; }
 
-        static token enter() noexcept { return {}; }
+  template <class Node>
+  static void retire(Node* p) noexcept { 
+    retire_buffer.push_back(static_cast<void*>(p));
+    if (retire_buffer.size() % RETIRE_BUFFER_SIZE == 0) {
+      quiescent();
+    }
+  }
+};
 
-        //   Memory Leak (Default)
-        template <class Node>
-        static void retire(Node* /*p*/) noexcept {
-            // 什麼都不做，讓它洩漏
-            // 這樣最安全，也最單純
-        }
+thread_local std::vector<void*> no_reclamation::retire_buffer;
 
-        //   Unsafe Reuse / System Free
-        // template <class Node>
-        // static void retire(Node *p) noexcept
-        // {
-        //     delete p;
-        // }
-    };
+} // namespace lfq::reclaimer
 
-} // namespace mpmcq::reclaimer
