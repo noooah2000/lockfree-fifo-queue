@@ -215,48 +215,68 @@ public:
         }
     }
 
-    bool try_dequeue(T& out) 
+    bool try_dequeue(T& out)
     {
         SimpleBackoff bk;
-        for (;;) 
+        for (;;)
         {
             Node* curr_head = head_.load(std::memory_order_acquire);
+            
+            // [HP 關鍵步驟 1] 先掛上 Hazard Pointer 保護 curr_head
+            Reclaimer::protect_at(0, curr_head);
+
+            // [HP 關鍵步驟 2] 記憶體屏障 (Memory Fence)，確保 protect 指令先執行
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+
+            // [HP 關鍵步驟 3] 再次檢查 head 是否改變
+            // 如果 head 已經變了，代表 curr_head 可能已經被別人 pop 並且 delete 掉了
+            // 這時候我們的保護可能太晚了，必須重來
+            if (curr_head != head_.load(std::memory_order_acquire))
+            {
+                // 失敗重試前，不需要清除保護，下次迴圈會覆蓋
+                continue; 
+            }
+
             Node* curr_tail = tail_.load(std::memory_order_acquire);
             Node* head_next = curr_head->next.load(std::memory_order_acquire);
             
-            // 驗證一致性：head 在讀取期間未變
-            if (curr_head == head_.load(std::memory_order_acquire)) 
+            // 注意：這裡 next 也要保護嗎？
+            // M&S Queue 的演算法特性是只要保護 Head 即可安全讀取 next
+            // 因為如果 Head 沒變，Head 節點就不會被釋放，next 也就是安全的。
+            
+            if (head_next == nullptr)
             {
-                // 佇列為空
-                if (head_next == nullptr) return false;
-
-                if (curr_head == curr_tail) 
-                {
-                    // tail 落後，幫其推進
-                    Node* expected_tail = curr_tail;
-                    (void)tail_.compare_exchange_strong(expected_tail, 
-                                                        head_next,
-                                                        std::memory_order_release, 
-                                                        std::memory_order_relaxed);
-                    bk.pause();
-                    continue;
-                }
-                
-                out = head_next->value;
-                
-                // 嘗試推進 head
-                if (head_.compare_exchange_weak(curr_head, 
-                                                head_next,
-                                                std::memory_order_release, 
-                                                std::memory_order_relaxed)) 
-                {
-                    // 成功推進 head，可以回收舊 head
-                    Reclaimer::retire(curr_head);
-                    return true;
-                }
-                // CAS 失敗，休息一下
-                bk.pause();
+                Reclaimer::protect_at(0, nullptr); // 離開前清除保護
+                return false;
             }
+            
+            if (curr_head == curr_tail)
+            {
+                Node* expected_tail = curr_tail;
+                tail_.compare_exchange_strong(expected_tail, 
+                                              head_next, 
+                                              std::memory_order_release, 
+                                              std::memory_order_relaxed);
+                bk.pause();
+                Reclaimer::protect_at(0, nullptr); // 重試前清除保護(雖然不清除也行，但習慣好)
+                continue;
+            }
+            
+            out = head_next->value;
+            
+            if (head_.compare_exchange_weak(curr_head, 
+                                            head_next, 
+                                            std::memory_order_release, 
+                                            std::memory_order_relaxed))
+            {            
+                // 成功推進 head，可以回收舊 head
+                Reclaimer::protect_at(0, nullptr); // 成功 dequeue，自己不用保護了
+                Reclaimer::retire(curr_head);              // 丟給回收員
+                return true;
+            }
+            
+            // 迴圈重試，protect_at 會在開頭重設
+            bk.pause();
         }
     }
 

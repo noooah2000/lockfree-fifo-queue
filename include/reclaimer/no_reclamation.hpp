@@ -47,6 +47,8 @@ namespace mpmcq::reclaimer
         // {
         //     delete p;
         // }
+
+        static void protect_at(int, void*) {}   // 對齊 HP 實作
     };
 
 } // namespace mpmcq::reclaimer
