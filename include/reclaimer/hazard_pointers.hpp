@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <mutex>
 
-namespace lfq::reclaimer {
+namespace mpmcq::reclaimer {
 
 // Hazard Pointers 實現（簡化版）
 // 每個執行緒最多同時持有 K 個危險指針
@@ -100,4 +100,4 @@ struct hazard_pointers {
   }
 };
 
-} // namespace lfq::reclaimer
+} // namespace mpmcq::reclaimer
