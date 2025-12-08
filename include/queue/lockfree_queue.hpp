@@ -98,6 +98,7 @@ public:
             return new_node;
         }
 
+        // 2. 本地沒了，去全域搬貨 (一次搬 32 個)
         {
             std::lock_guard<std::mutex> lock(global_pool_mutex);
             if (!global_pool.empty()) 
@@ -112,6 +113,7 @@ public:
             }
         }
 
+        // 3. 搬完後再查一次本地
         if (!local_pool.vec.empty()) 
         {
             Node* new_node = local_pool.vec.back();
@@ -119,14 +121,17 @@ public:
             return new_node;
         }
         
+        // 4. 真的沒貨，跟 OS 要記憶體 (使用 ::operator new 防止遞迴)
         return static_cast<Node*>(::operator new(sizeof(Node)));
     }
 
     static void deallocate(Node* recycled_node) 
     {
         // 多此一舉 先註解掉
+        // 重置 next 指標，防止髒數據
         // recycled_node->next.store(nullptr, std::memory_order_relaxed);
         
+        // 如果本地積太多 (>64)，還一半給全域
         // 改用 local_pool.vec
         if (local_pool.vec.size() > 64) 
         {
@@ -137,6 +142,7 @@ public:
                 local_pool.vec.pop_back();
             }
         }
+        // 放回本地
         local_pool.vec.push_back(recycled_node);
     }
 };

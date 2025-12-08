@@ -99,9 +99,11 @@ static void run_benchmark(const BenchmarkArgs& args, const char* impl_name)
                 if (queue.enqueue(std::pair<int, long long>{p, seq++})) 
                 {
                     enqueue_count.fetch_add(1, std::memory_order_relaxed);
+#ifdef BENCH_USE_DEPTH
                     int depth = current_depth.fetch_add(1, std::memory_order_relaxed) + 1;
                     int prev_max = max_depth.load(std::memory_order_relaxed);
                     while (depth > prev_max && !max_depth.compare_exchange_weak(prev_max, depth)) {}
+#endif // BENCH_USE_DEPTH
                 } 
                 else 
                 {
@@ -131,7 +133,9 @@ static void run_benchmark(const BenchmarkArgs& args, const char* impl_name)
                 if (queue.try_dequeue(value)) 
                 {
                     dequeue_count.fetch_add(1, std::memory_order_relaxed);
+#ifdef BENCH_USE_DEPTH
                     current_depth.fetch_sub(1, std::memory_order_relaxed);
+#endif // BENCH_USE_DEPTH
                     simulate_work(args.payload_us);
                 } 
                 else 
@@ -155,8 +159,8 @@ static void run_benchmark(const BenchmarkArgs& args, const char* impl_name)
     std::this_thread::sleep_for(std::chrono::seconds(args.warmup_s));
 
     // 正式量測區間
-    long long dequeue_start = dequeue_count.load();
     std::cout << "Running benchmark for " << args.duration_s << "s..." << std::endl;
+    long long dequeue_start = dequeue_count.load();
     auto time_start = Clock::now();
     
     std::this_thread::sleep_for(std::chrono::seconds(args.duration_s));
