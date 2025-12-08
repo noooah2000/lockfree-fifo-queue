@@ -60,24 +60,44 @@ struct SimpleBackoff
 
 // 必須將 NodePool 定義在 LockFreeQueue 之前，否則編譯器找不到
 template <typename Node>
-class NodePool {
+class NodePool 
+{
+    // 1. 定義一個內部類別來管理本地緩衝區
+    struct LocalBuffer 
+    {
+        std::vector<Node*> vec;
+        // 解構子：當執行緒結束時自動執行
+        ~LocalBuffer() 
+        {
+            if (!vec.empty())
+            {
+                // 把私房錢歸還給全域池 (讓其他執行緒重用)
+                std::lock_guard<std::mutex> lock(NodePool::global_pool_mutex);
+                for (Node* node : vec) 
+                {
+                    NodePool::global_pool.push_back(node);
+                }
+            }
+        }
+    };
+
 public:
-    // C++17 inline static: 不需要再到 class 外面定義了，超乾淨！
-    inline static thread_local std::vector<Node*> local_pool;
+    // 2. 將原本直接宣告 vector 改為宣告這個 Wrapper
+    // 注意：這裡是 thread_local，每個執行緒都有一個獨立的 LocalBuffer 物件
+    inline static thread_local LocalBuffer local_pool;
     inline static std::mutex global_pool_mutex;
     inline static std::vector<Node*> global_pool;
 
     static Node* allocate() 
     {
-        // 1. 查本地背包
-        if (!local_pool.empty()) 
+        // 改用 local_pool.vec 來存取 vector
+        if (!local_pool.vec.empty()) 
         {
-            Node* new_node = local_pool.back();
-            local_pool.pop_back();
+            Node* new_node = local_pool.vec.back();
+            local_pool.vec.pop_back();
             return new_node;
         }
 
-        // 2. 本地沒了，去全域搬貨 (一次搬 32 個)
         {
             std::lock_guard<std::mutex> lock(global_pool_mutex);
             if (!global_pool.empty()) 
@@ -85,42 +105,39 @@ public:
                 int count = 0;
                 while(!global_pool.empty() && count < 32) 
                 {
-                    local_pool.push_back(global_pool.back());
+                    local_pool.vec.push_back(global_pool.back());
                     global_pool.pop_back();
                     count++;
                 }
             }
         }
 
-        // 3. 搬完後再查一次本地
-        if (!local_pool.empty()) 
+        if (!local_pool.vec.empty()) 
         {
-            Node* new_node = local_pool.back();
-            local_pool.pop_back();
+            Node* new_node = local_pool.vec.back();
+            local_pool.vec.pop_back();
             return new_node;
         }
         
-        // 4. 真的沒貨，跟 OS 要記憶體 (使用 ::operator new 防止遞迴)
         return static_cast<Node*>(::operator new(sizeof(Node)));
     }
 
     static void deallocate(Node* recycled_node) 
     {
-        // 重置 next 指標，防止髒數據
-        recycled_node->next.store(nullptr, std::memory_order_relaxed);
+        // 多此一舉 先註解掉
+        // recycled_node->next.store(nullptr, std::memory_order_relaxed);
         
-        // 如果本地積太多 (>64)，還一半給全域
-        if (local_pool.size() > 64) 
+        // 改用 local_pool.vec
+        if (local_pool.vec.size() > 64) 
         {
             std::lock_guard<std::mutex> lock(global_pool_mutex);
             for (int i=0; i<32; ++i) 
             {
-                global_pool.push_back(local_pool.back());
-                local_pool.pop_back();
+                global_pool.push_back(local_pool.vec.back());
+                local_pool.vec.pop_back();
             }
         }
-        // 放回本地
-        local_pool.push_back(recycled_node);
+        local_pool.vec.push_back(recycled_node);
     }
 };
 
@@ -172,6 +189,7 @@ public:
 
     bool enqueue(const T& v) 
     {
+        auto token = Reclaimer::enter();
         if (is_closed()) return false;
         Node* new_node = new Node(v);
         SimpleBackoff bk;
@@ -217,6 +235,7 @@ public:
 
     bool try_dequeue(T& out)
     {
+        auto token = Reclaimer::enter();
         SimpleBackoff bk;
         for (;;)
         {

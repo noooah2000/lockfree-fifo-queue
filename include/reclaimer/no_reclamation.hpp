@@ -1,5 +1,4 @@
 #pragma once
-
 /**
  * 1. Memory Leak (Default):
  *      不 delete:
@@ -15,40 +14,37 @@
  *          每次 Enqueue/Dequeue 都觸發 OS 記憶體管理器的 Global Lock 競爭，
  *          導致嚴重的 Scalability 崩潰 (比 "不 delete" 還慢，因為多了 free 的開銷)。
  */
-
 namespace mpmcq::reclaimer
 {
-
-    struct no_reclamation
+struct no_reclamation
+{
+    struct token
     {
-        struct token
-        {
-        };
-
-        // 不需要任何狀態，不需要 thread_local buffer
-
-        static void quiescent() noexcept
-        {
-            // 空實作
-        }
-
-        static token enter() noexcept { return {}; }
-
-        //   Memory Leak (Default)
-        template <class Node>
-        static void retire(Node* /*p*/) noexcept {
-            // 什麼都不做，讓它洩漏
-            // 這樣最安全，也最單純
-        }
-
-        // //   Unsafe Reuse / System Free
-        // template <class Node>
-        // static void retire(Node *p) noexcept
-        // {
-        //     delete p;
-        // }
-
-        static void protect_at(int, void*) {}   // 對齊 HP 實作
     };
+
+    // 不需要任何狀態，不需要 thread_local buffer
+    static void quiescent() noexcept
+    {
+        // 空實作
+    }
+
+    static token enter() noexcept { return {}; }
+
+    //   Memory Leak (Default)
+    template <class Node>
+    static void retire(Node* /*p*/) noexcept {
+        // 什麼都不做，讓它洩漏
+        // 這樣最安全，也最單純
+    }
+
+    // //   Unsafe Reuse / System Free
+    // template <class Node>
+    // static void retire(Node *p) noexcept
+    // {
+    //     delete p;
+    // }
+
+    static void protect_at(int, void*) {}   // 對齊 HP 實作
+};
 
 } // namespace mpmcq::reclaimer
