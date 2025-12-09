@@ -148,17 +148,25 @@ def plot_tail_latency(data, target_payload):
 
 def plot_latency_breakdown(data, target_payload):
     """圖表 3: 高負載下的延遲分佈對比 (P50, P99, P99.9)"""
-    # 自動找出該 Payload 下測試過的最大執行緒數 (最嚴苛的條件)
+    # 自動找出該 Payload 下測試過的最大執行緒數
     max_threads = get_max_threads_for_payload(data, target_payload)
     if max_threads == 0: return
 
-    subset = [d for d in data if d['threads'] == max_threads and d['payload_us'] == target_payload]
+    # 1. 初步過濾
+    raw_subset = [d for d in data if d['threads'] == max_threads and d['payload_us'] == target_payload]
     
-    if not subset: return
+    if not raw_subset: return
 
-    # 排序：確保長條圖順序一致
-    subset.sort(key=lambda x: x['impl'])
+    # 2. 去除重複 (Deduplication)
+    # 如果多個 CSV 包含相同的 impl/threads/payload 組合，我們用字典來只保留一筆
+    unique_data = {}
+    for d in raw_subset:
+        unique_data[d['impl']] = d
     
+    # 轉回 list 並依照 impl 名稱排序
+    subset = sorted(unique_data.values(), key=lambda x: x['impl'])
+    
+    # 3. 準備繪圖數據
     impls = [d['impl'] for d in subset]
     p50s = [d['p50'] for d in subset]
     p99s = [d['p99'] for d in subset]
@@ -169,21 +177,23 @@ def plot_latency_breakdown(data, target_payload):
 
     plt.figure(figsize=(10, 6))
     
-    plt.bar(x - width, p50s, width, label='P50 (Median)', alpha=0.8)
-    plt.bar(x, p99s, width, label='P99', alpha=0.8)
-    plt.bar(x + width, p999s, width, label='P99.9', alpha=0.8)
+    # 使用稍微透明的顏色讓重疊部分不那麼刺眼，這裡分開畫條形圖
+    plt.bar(x - width, p50s, width, label='P50 (Median)', alpha=0.9)
+    plt.bar(x, p99s, width, label='P99', alpha=0.9)
+    plt.bar(x + width, p999s, width, label='P99.9', alpha=0.9)
     
     plt.xlabel('Implementation')
     plt.ylabel('Latency (μs) - Log Scale')
     plt.title(f'Latency Distribution\n(Threads={max_threads}, Payload={target_payload}μs)')
-    plt.xticks(x, impls)
+    plt.xticks(x, impls) # 設定 X 軸標籤
     plt.legend()
-    plt.yscale('log') 
+    plt.yscale('log')    # Log Scale
     plt.grid(True, axis='y', which='both', alpha=0.3)
     
+    output_path = f"{RESULTS_DIR}/plot_latency_breakdown.png"
     plt.tight_layout()
-    plt.savefig(f"{RESULTS_DIR}/plot_latency_breakdown.png")
-    print(f"✓ Saved {RESULTS_DIR}/plot_latency_breakdown.png")
+    plt.savefig(output_path)
+    print(f"✓ Saved {output_path}")
     plt.close()
 
 def main():
@@ -200,3 +210,6 @@ def main():
     plot_scalability(data, target_payload)
     plot_tail_latency(data, target_payload)
     plot_latency_breakdown(data, target_payload)
+
+if __name__ == "__main__":
+    main()
