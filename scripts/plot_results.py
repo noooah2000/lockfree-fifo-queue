@@ -1,282 +1,202 @@
 #!/usr/bin/env python3
-"""
-Plot comprehensive performance metrics from benchmark results.
-Generates 6 comparison charts:
-  1. Threads vs Throughput
-  2. Threads vs Tail Latency (max_depth)
-  3. Threads vs Memory Peak
-  4. Payload vs Throughput
-  5. Payload vs Tail Latency
-  6. Payload vs Memory Peak
-"""
 import csv
 import glob
 import os
-from collections import defaultdict
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import defaultdict
 
-PLAYLOAD = 4
+# 設定圖表風格
+plt.style.use('ggplot') 
+RESULTS_DIR = "results"
 
-def load_results():
-    """Load all CSV results into memory."""
-    rows = []
-    for path in sorted(glob.glob("results/*.csv")):
-        with open(path, newline="") as f:
-            r = list(csv.DictReader(f))
-            rows.extend(r)
-    return rows
+def load_data():
+    """讀取所有 CSV 檔案並解析數據"""
+    data = []
+    files = glob.glob(os.path.join(RESULTS_DIR, "*.csv"))
+    if not files:
+        print(f"Error: No CSV files found in {RESULTS_DIR}/")
+        return []
 
-def parse_row(r):
-    """Parse a CSV row into typed values."""
-    try:
-        return {
-            'impl': r['impl'],
-            'P': int(r['P']),
-            'C': int(r['C']),
-            'payload_us': int(r['payload_us']),
-            'duration_s': int(r['duration_s']),
-            'throughput_ops': float(r['throughput_ops']),
-            'max_depth': int(r['max_depth']),
-        }
-    except (ValueError, KeyError):
-        return None
+    print(f"Loading {len(files)} CSV files...")
+    
+    for filename in files:
+        with open(filename, newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    # 處理欄位名稱可能前後有空白的問題
+                    row = {k.strip(): v.strip() for k, v in row.items()}
+                    
+                    data.append({
+                        'impl': row['impl'],
+                        'P': int(row['P']),
+                        'C': int(row['C']),
+                        'threads': int(row['P']) + int(row['C']), # 總執行緒數
+                        'payload_us': int(row['payload_us']),
+                        'throughput': float(row['throughput']),
+                        # 將 ns 轉為 us，方便閱讀
+                        'avg_lat': float(row['avg_lat']) / 1000.0,
+                        'p50': float(row['p50']) / 1000.0,
+                        'p99': float(row['p99']) / 1000.0,
+                        'p999': float(row['p999']) / 1000.0,
+                        'max_lat': float(row['max_lat']) / 1000.0
+                    })
+                except KeyError as e:
+                    # 兼容舊版 CSV 或略過錯誤行
+                    continue
+                except ValueError as e:
+                    continue
+    return data
 
-def plot_threads_vs_metrics(rows):
-    """Plot (Threads, Throughput), (Threads, Tail Latency), (Threads, Memory Peak)."""
-    # Group by impl and fixed payload
-    fixed_payload = PLAYLOAD
-    series = defaultdict(list)  # impl -> list of (threads, metric)
+def detect_scalability_payload(data):
+    """
+    自動偵測哪一個 payload 是用來做 Scalability 測試的。
+    邏輯：找出擁有「最多不同執行緒數量組合」的 payload。
+    """
+    payload_thread_counts = defaultdict(set)
     
-    for r in rows:
-        if r['payload_us'] != fixed_payload:
-            continue
-        impl = r['impl']
-        threads = r['P']  # P = C = threads
-        series[impl].append((threads, r['throughput_ops'], r['max_depth']))
+    for d in data:
+        payload_thread_counts[d['payload_us']].add(d['threads'])
+        
+    # 找出 set 大小最大的那個 payload
+    best_payload = None
+    max_variations = -1
     
-    # Sort by threads
-    for impl in series:
-        series[impl].sort(key=lambda x: x[0])
-    
-    # Create 3 subplots
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    
-    # 1. Threads vs Throughput
-    ax = axes[0]
-    for impl in sorted(series.keys()):
-        pts = series[impl]
-        ax.plot([x[0] for x in pts], [x[1] for x in pts], marker='o', label=impl, linewidth=2)
-    ax.set_xlabel('Threads (P=C)', fontsize=11)
-    ax.set_ylabel('Throughput (ops/s)', fontsize=11)
-    ax.set_title(f'Throughput vs Threads\n(payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 2. Threads vs Max Depth (Tail Latency)
-    ax = axes[1]
-    for impl in sorted(series.keys()):
-        pts = series[impl]
-        ax.plot([x[0] for x in pts], [x[2] for x in pts], marker='s', label=impl, linewidth=2)
-    ax.set_xlabel('Threads (P=C)', fontsize=11)
-    ax.set_ylabel('Max Depth (queue depth)', fontsize=11)
-    ax.set_title(f'Tail Latency vs Threads\n(payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 3. Threads vs Memory Peak (normalized by max_depth)
-    ax = axes[2]
-    for impl in sorted(series.keys()):
-        pts = series[impl]
-        # Estimate memory as proportional to max_depth * node_size
-        # Using max_depth as proxy
-        ax.plot([x[0] for x in pts], [x[2] for x in pts], marker='^', label=impl, linewidth=2)
-    ax.set_xlabel('Threads (P=C)', fontsize=11)
-    ax.set_ylabel('Memory Peak (estimated)', fontsize=11)
-    ax.set_title(f'Memory Peak vs Threads\n(payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig('results/fig_threads_metrics.png', dpi=160, bbox_inches='tight')
-    print("✓ Saved: results/fig_threads_metrics.png")
-    plt.close()
+    for p, threads_set in payload_thread_counts.items():
+        if len(threads_set) > max_variations:
+            max_variations = len(threads_set)
+            best_payload = p
+        elif len(threads_set) == max_variations:
+            # 如果數量一樣，優先選 payload 較小的 (通常負載低更能測出 Queue 本身瓶頸)
+            if best_payload is None or p < best_payload:
+                best_payload = p
+                
+    if best_payload is not None:
+        print(f"🔍 Auto-detected Scalability Payload: {best_payload} μs (Tested with {max_variations} different thread counts)")
+    return best_payload
 
-def plot_payload_vs_metrics(rows):
-    """Plot (Payload, Throughput), (Payload, Tail Latency), (Payload, Memory Peak)."""
-    # Group by impl and fixed threads (P=8, C=8)
-    fixed_threads = 8
-    series = defaultdict(list)  # impl -> list of (payload, metric)
-    
-    for r in rows:
-        if r['P'] != fixed_threads or r['C'] != fixed_threads:
-            continue
-        impl = r['impl']
-        payload = r['payload_us']
-        series[impl].append((payload, r['throughput_ops'], r['max_depth']))
-    
-    # Sort by payload
-    for impl in series:
-        series[impl].sort(key=lambda x: x[0])
-    
-    # Create 3 subplots
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    
-    # 1. Payload vs Throughput
-    ax = axes[0]
-    for impl in sorted(series.keys()):
-        pts = series[impl]
-        ax.plot([x[0] for x in pts], [x[1] for x in pts], marker='o', label=impl, linewidth=2)
-    ax.set_xlabel('Payload (μs)', fontsize=11)
-    ax.set_ylabel('Throughput (ops/s)', fontsize=11)
-    ax.set_title('Throughput vs Payload\n(P=8, C=8)', fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 2. Payload vs Max Depth (Tail Latency)
-    ax = axes[1]
-    for impl in sorted(series.keys()):
-        pts = series[impl]
-        ax.plot([x[0] for x in pts], [x[2] for x in pts], marker='s', label=impl, linewidth=2)
-    ax.set_xlabel('Payload (μs)', fontsize=11)
-    ax.set_ylabel('Max Depth (queue depth)', fontsize=11)
-    ax.set_title('Tail Latency vs Payload\n(P=8, C=8)', fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 3. Payload vs Memory Peak
-    ax = axes[2]
-    for impl in sorted(series.keys()):
-        pts = series[impl]
-        ax.plot([x[0] for x in pts], [x[2] for x in pts], marker='^', label=impl, linewidth=2)
-    ax.set_xlabel('Payload (μs)', fontsize=11)
-    ax.set_ylabel('Memory Peak (estimated)', fontsize=11)
-    ax.set_title('Memory Peak vs Payload\n(P=8, C=8)', fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig('results/fig_payload_metrics.png', dpi=160, bbox_inches='tight')
-    print("✓ Saved: results/fig_payload_metrics.png")
-    plt.close()
+def get_max_threads_for_payload(data, target_payload):
+    """找出指定 payload 下，最大的執行緒數量 (用於繪製 Breakdown 圖)"""
+    subset = [d for d in data if d['payload_us'] == target_payload]
+    if not subset:
+        return 0
+    return max(d['threads'] for d in subset)
 
-def plot_implementation_comparison(rows):
-    """Create side-by-side bar chart comparing all implementations."""
-    # Filter for P=8, C=8, payload=PLAYLOAD us
-    filtered = [r for r in rows 
-                if r['P'] == 8 and r['C'] == 8 and r['payload_us'] == PLAYLOAD]
+def plot_scalability(data, target_payload):
+    """圖表 1: 執行緒數 vs 吞吐量 (Scalability)"""
+    subset = [d for d in data if d['payload_us'] == target_payload]
     
-    if not filtered:
-        print(f"⚠ No data for implementation comparison (P=8, C=8, payload={PLAYLOAD}μs)")
+    if not subset:
+        print(f"⚠ No data found for payload={target_payload}us")
         return
+
+    impls = set(d['impl'] for d in subset)
     
-    impls = sorted(set(r['impl'] for r in filtered))
-    throughputs = [next(r['throughput_ops'] for r in filtered if r['impl'] == impl) for impl in impls]
-    max_depths = [next(r['max_depth'] for r in filtered if r['impl'] == impl) for impl in impls]
+    plt.figure(figsize=(10, 6))
     
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    
-    # Throughput comparison
-    ax = axes[0]
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
-    ax.bar(impls, throughputs, color=colors[:len(impls)], alpha=0.8, edgecolor='black', linewidth=1.5)
-    ax.set_ylabel('Throughput (ops/s)', fontsize=11)
-    ax.set_title(f'Throughput Comparison\n(P=8, C=8, payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
-    ax.grid(True, axis='y', alpha=0.3)
-    
-    # Add value labels on bars
-    for i, v in enumerate(throughputs):
-        ax.text(i, v, f'{v:.0f}', ha='center', va='bottom', fontsize=10)
-    
-    # Max depth comparison
-    ax = axes[1]
-    ax.bar(impls, max_depths, color=colors[:len(impls)], alpha=0.8, edgecolor='black', linewidth=1.5)
-    ax.set_ylabel('Max Depth', fontsize=11)
-    ax.set_title(f'Max Depth Comparison\n(P=8, C=8, payload={PLAYLOAD}μs)', fontsize=12, fontweight='bold')
-    ax.grid(True, axis='y', alpha=0.3)
-    
-    # Add value labels on bars
-    for i, v in enumerate(max_depths):
-        ax.text(i, v, f'{v}', ha='center', va='bottom', fontsize=10)
-    
+    markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
+    linestyles = {'hp': '-', 'ebr': '-', 'mutex': '--', 'none': ':'}
+
+    for impl in sorted(impls):
+        rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['threads'])
+        # 使用總執行緒數 (P+C) 作為 X 軸
+        x = [r['threads'] for r in rows] 
+        y = [r['throughput'] / 1_000_000 for r in rows] # M ops/sec
+        
+        plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), 
+                 linestyle=linestyles.get(impl, '-'), linewidth=2)
+
+    plt.title(f"Throughput Scalability (Payload={target_payload}μs)")
+    plt.xlabel("Total Threads (Producers + Consumers)")
+    plt.ylabel("Throughput (Million ops/sec)")
+    plt.legend()
+    plt.grid(True)
     plt.tight_layout()
-    plt.savefig('results/fig_implementation_comparison.png', dpi=160, bbox_inches='tight')
-    print("✓ Saved: results/fig_implementation_comparison.png")
+    plt.savefig(f"{RESULTS_DIR}/plot_throughput.png")
+    print(f"✓ Saved {RESULTS_DIR}/plot_throughput.png")
     plt.close()
 
-def generate_summary_table(rows):
-    """Generate a summary table of all results."""
-    # Parse and filter rows
-    parsed_rows = [parse_row(r) for r in rows]
-    parsed_rows = [r for r in parsed_rows if r is not None]
+def plot_tail_latency(data, target_payload):
+    """圖表 2: 執行緒數 vs P99.9 Latency (Log Scale)"""
+    subset = [d for d in data if d['payload_us'] == target_payload]
+    if not subset: return
+
+    impls = set(d['impl'] for d in subset)
     
-    if not parsed_rows:
-        return
+    plt.figure(figsize=(10, 6))
     
-    # Group by impl
-    by_impl = defaultdict(list)
-    for r in parsed_rows:
-        by_impl[r['impl']].append(r)
+    markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
     
-    print("\n" + "="*80)
-    print("📊 PERFORMANCE SUMMARY")
-    print("="*80)
-    
-    for impl in sorted(by_impl.keys()):
-        results = by_impl[impl]
-        throughputs = [r['throughput_ops'] for r in results]
-        depths = [r['max_depth'] for r in results]
+    for impl in sorted(impls):
+        rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['threads'])
+        x = [r['threads'] for r in rows]
+        y = [r['p999'] for r in rows] # 已經是 us
         
-        print(f"\n[{impl.upper()}]")
-        print(f"  Avg Throughput: {np.mean(throughputs):,.0f} ops/s (min: {np.min(throughputs):,.0f}, max: {np.max(throughputs):,.0f})")
-        print(f"  Avg Max Depth:  {np.mean(depths):.1f} (min: {np.min(depths)}, max: {np.max(depths)})")
-        
-        # Thread scaling efficiency (if we have thread data)
-        thread_data = defaultdict(list)
-        for r in results:
-            if r['payload_us'] == PLAYLOAD:
-                thread_data[r['P']].append(r)
-        
-        if len(thread_data) > 1:
-            threads = sorted(thread_data.keys())
-            throughputs_by_thread = [np.mean([r['throughput_ops'] for r in thread_data[t]]) for t in threads]
-            print(f"  Thread Scaling: {threads[0]}T={throughputs_by_thread[0]:,.0f} ops/s " +
-                  f"→ {threads[-1]}T={throughputs_by_thread[-1]:,.0f} ops/s " +
-                  f"(speedup: {throughputs_by_thread[-1]/throughputs_by_thread[0]:.2f}x)")
+        plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), linewidth=2)
+
+    plt.title(f"Tail Latency P99.9 (Payload={target_payload}μs)")
+    plt.xlabel("Total Threads (Producers + Consumers)")
+    plt.ylabel("Latency (μs) - Log Scale")
+    plt.yscale('log')
+    plt.legend()
+    plt.grid(True, which="both", ls="-", alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(f"{RESULTS_DIR}/plot_latency_p999.png")
+    print(f"✓ Saved {RESULTS_DIR}/plot_latency_p999.png")
+    plt.close()
+
+def plot_latency_breakdown(data, target_payload):
+    """圖表 3: 高負載下的延遲分佈對比 (P50, P99, P99.9)"""
+    # 自動找出該 Payload 下測試過的最大執行緒數 (最嚴苛的條件)
+    max_threads = get_max_threads_for_payload(data, target_payload)
+    if max_threads == 0: return
+
+    subset = [d for d in data if d['threads'] == max_threads and d['payload_us'] == target_payload]
+    
+    if not subset: return
+
+    # 排序：確保長條圖順序一致
+    subset.sort(key=lambda x: x['impl'])
+    
+    impls = [d['impl'] for d in subset]
+    p50s = [d['p50'] for d in subset]
+    p99s = [d['p99'] for d in subset]
+    p999s = [d['p999'] for d in subset]
+    
+    x = np.arange(len(impls))
+    width = 0.25
+
+    plt.figure(figsize=(10, 6))
+    
+    plt.bar(x - width, p50s, width, label='P50 (Median)', alpha=0.8)
+    plt.bar(x, p99s, width, label='P99', alpha=0.8)
+    plt.bar(x + width, p999s, width, label='P99.9', alpha=0.8)
+    
+    plt.xlabel('Implementation')
+    plt.ylabel('Latency (μs) - Log Scale')
+    plt.title(f'Latency Distribution\n(Threads={max_threads}, Payload={target_payload}μs)')
+    plt.xticks(x, impls)
+    plt.legend()
+    plt.yscale('log') 
+    plt.grid(True, axis='y', which='both', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f"{RESULTS_DIR}/plot_latency_breakdown.png")
+    print(f"✓ Saved {RESULTS_DIR}/plot_latency_breakdown.png")
+    plt.close()
 
 def main():
-    """Main entry point."""
-    rows = load_results()
+    data = load_data()
+    if not data: return
     
-    if not rows:
-        print("⚠ No CSV files found in results/. Run './scripts/run_matrix.sh' first.")
+    # 自動偵測 payload
+    target_payload = detect_scalability_payload(data)
+    
+    if target_payload is None:
+        print("❌ Could not detect a valid payload for plotting.")
         return
-    
-    # Parse rows and filter out invalid ones
-    parsed_rows = [parse_row(r) for r in rows]
-    parsed_rows = [r for r in parsed_rows if r is not None]
-    
-    if not parsed_rows:
-        print("⚠ No valid rows found in CSV files.")
-        return
-    
-    print(f"📈 Loaded {len(parsed_rows)} benchmark results")
-    print("\n🎨 Generating plots...")
-    
-    # Create output directory
-    os.makedirs("results", exist_ok=True)
-    
-    # Generate plots
-    plot_threads_vs_metrics(parsed_rows)
-    plot_payload_vs_metrics(parsed_rows)
-    plot_implementation_comparison(parsed_rows)
-    
-    # Generate summary
-    generate_summary_table(rows)
-    
-    print("\n" + "="*80)
-    print("✅ All plots generated successfully!")
-    print("="*80)
 
-if __name__ == "__main__":
-    main()
+    plot_scalability(data, target_payload)
+    plot_tail_latency(data, target_payload)
+    plot_latency_breakdown(data, target_payload)
