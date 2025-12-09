@@ -25,17 +25,13 @@ def load_data():
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    # 處理欄位名稱可能前後有空白的問題
                     row = {k.strip(): v.strip() for k, v in row.items()}
-                    
                     data.append({
                         'impl': row['impl'],
                         'P': int(row['P']),
                         'C': int(row['C']),
-                        # 雖然我們有 P 和 C，但之後繪圖主要只看 P
                         'payload_us': int(row['payload_us']),
                         'throughput': float(row['throughput']),
-                        # 將 ns 轉為 us
                         'avg_lat': float(row['avg_lat']) / 1000.0,
                         'p50': float(row['p50']) / 1000.0,
                         'p99': float(row['p99']) / 1000.0,
@@ -46,125 +42,148 @@ def load_data():
                     continue
     return data
 
+# ==========================================
+# 偵測邏輯
+# ==========================================
+
 def detect_scalability_payload(data):
-    """
-    自動偵測哪一個 payload 是用來做 Scalability 測試的。
-    邏輯：找出擁有「最多不同 Producer 數量組合」的 payload。
-    """
-    payload_thread_counts = defaultdict(set)
-    
+    """偵測用於 Scalability 測試的固定 Payload (尋找 P 變化最多的 Payload)"""
+    counts = defaultdict(set)
     for d in data:
-        # 改為偵測 P 的變化數量
-        payload_thread_counts[d['payload_us']].add(d['P'])
-        
-    best_payload = None
-    max_variations = -1
+        counts[d['payload_us']].add(d['P'])
     
-    for p, p_counts_set in payload_thread_counts.items():
-        if len(p_counts_set) > max_variations:
-            max_variations = len(p_counts_set)
+    best_payload = None
+    max_vars = -1
+    for p, p_set in counts.items():
+        if len(p_set) > max_vars:
+            max_vars = len(p_set)
             best_payload = p
-        elif len(p_counts_set) == max_variations:
-            if best_payload is None or p < best_payload:
-                best_payload = p
-                
+    
     if best_payload is not None:
-        print(f"🔍 Auto-detected Scalability Payload: {best_payload} μs (Tested with {max_variations} different producer counts)")
+        print(f"🔍 [Scalability] Detected fixed Payload: {best_payload} μs (Varied threads)")
     return best_payload
 
-def get_max_producers_for_payload(data, target_payload):
-    """找出指定 payload 下，最大的 Producer 數量"""
-    subset = [d for d in data if d['payload_us'] == target_payload]
-    if not subset:
-        return 0
-    return max(d['P'] for d in subset)
+def detect_sensitivity_threads(data):
+    """偵測用於 Payload 測試的固定執行緒數 (尋找 Payload 變化最多的 P)"""
+    counts = defaultdict(set)
+    for d in data:
+        counts[d['P']].add(d['payload_us'])
+        
+    best_p = None
+    max_vars = -1
+    for p, payload_set in counts.items():
+        if len(payload_set) > max_vars:
+            max_vars = len(payload_set)
+            best_p = p
+            
+    if best_p is not None:
+        print(f"🔍 [Sensitivity] Detected fixed Producer Count: {best_p} (Varied payloads)")
+    return best_p
+
+# ==========================================
+# 繪圖函式
+# ==========================================
 
 def plot_scalability(data, target_payload):
-    """圖表 1: Producer 數 vs 吞吐量 (Scalability)"""
-    subset = [d for d in data if d['payload_us'] == target_payload]
-    
-    if not subset:
-        print(f"⚠ No data found for payload={target_payload}us")
-        return
-
-    impls = set(d['impl'] for d in subset)
-    
-    plt.figure(figsize=(10, 6))
-    
-    markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
-    linestyles = {'hp': '-', 'ebr': '-', 'mutex': '--', 'none': ':'}
-
-    for impl in sorted(impls):
-        # 依照 Producer 數量排序
-        rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['P'])
-        
-        # X 軸改為只顯示 Producer 數量
-        x = [r['P'] for r in rows] 
-        y = [r['throughput'] / 1_000_000 for r in rows] # M ops/sec
-        
-        plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), 
-                 linestyle=linestyles.get(impl, '-'), linewidth=2)
-
-    plt.title(f"Throughput Scalability (Payload={target_payload}μs)")
-    plt.xlabel("Producer Threads (P=C)") # 更新標籤
-    plt.ylabel("Throughput (Million ops/sec)")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(f"{RESULTS_DIR}/plot_throughput.png")
-    print(f"✓ Saved {RESULTS_DIR}/plot_throughput.png")
-    plt.close()
-
-def plot_tail_latency(data, target_payload):
-    """圖表 2: Producer 數 vs P99.9 Latency (Log Scale)"""
+    """圖表 1: Producer 數 vs 吞吐量"""
     subset = [d for d in data if d['payload_us'] == target_payload]
     if not subset: return
 
     impls = set(d['impl'] for d in subset)
-    
     plt.figure(figsize=(10, 6))
-    
+    markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
+
+    for impl in sorted(impls):
+        rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['P'])
+        x = [r['P'] for r in rows] 
+        y = [r['throughput'] / 1_000_000 for r in rows] 
+        plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), linewidth=2)
+
+    plt.title(f"Throughput Scalability (Fixed Payload={target_payload}μs)")
+    plt.xlabel("Producer Threads (P=C)")
+    plt.ylabel("Throughput (Million ops/sec)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"{RESULTS_DIR}/plot_throughput_scalability.png")
+    print(f"✓ Saved {RESULTS_DIR}/plot_throughput_scalability.png")
+    plt.close()
+
+def plot_payload_sensitivity(data, target_p):
+    """圖表 2 (新): Payload vs 吞吐量"""
+    subset = [d for d in data if d['P'] == target_p]
+    if not subset: return
+
+    # 去除重複 (如果 matrix 跑了多次相同設定)
+    unique_data = {}
+    for d in subset:
+        key = (d['impl'], d['payload_us'])
+        unique_data[key] = d
+    subset = list(unique_data.values())
+
+    impls = set(d['impl'] for d in subset)
+    plt.figure(figsize=(10, 6))
+    markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
+
+    for impl in sorted(impls):
+        rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['payload_us'])
+        x = [r['payload_us'] for r in rows]
+        y = [r['throughput'] / 1_000_000 for r in rows]
+        plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), linewidth=2)
+
+    plt.title(f"Payload Sensitivity (Fixed Threads={target_p}P/{target_p}C)")
+    plt.xlabel("Payload Size (μs)")
+    plt.ylabel("Throughput (Million ops/sec)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"{RESULTS_DIR}/plot_payload_sensitivity.png")
+    print(f"✓ Saved {RESULTS_DIR}/plot_payload_sensitivity.png")
+    plt.close()
+
+def plot_tail_latency(data, target_payload):
+    """圖表 3: Producer 數 vs P99.9 Latency"""
+    subset = [d for d in data if d['payload_us'] == target_payload]
+    if not subset: return
+
+    impls = set(d['impl'] for d in subset)
+    plt.figure(figsize=(10, 6))
     markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
     
     for impl in sorted(impls):
         rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['P'])
-        
-        # X 軸改為只顯示 Producer 數量
         x = [r['P'] for r in rows]
         y = [r['p999'] for r in rows]
-        
         plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), linewidth=2)
 
-    plt.title(f"Tail Latency P99.9 (Payload={target_payload}μs)")
-    plt.xlabel("Producer Threads (P=C)") # 更新標籤
+    plt.title(f"Tail Latency P99.9 (Fixed Payload={target_payload}μs)")
+    plt.xlabel("Producer Threads (P=C)")
     plt.ylabel("Latency (μs) - Log Scale")
     plt.yscale('log')
     plt.legend()
     plt.grid(True, which="both", ls="-", alpha=0.5)
     plt.tight_layout()
-    plt.savefig(f"{RESULTS_DIR}/plot_latency_p999.png")
-    print(f"✓ Saved {RESULTS_DIR}/plot_latency_p999.png")
+    plt.savefig(f"{RESULTS_DIR}/plot_latency_scalability.png")
+    print(f"✓ Saved {RESULTS_DIR}/plot_latency_scalability.png")
     plt.close()
 
 def plot_latency_breakdown(data, target_payload):
-    """圖表 3: 高負載下的延遲分佈對比 (P50, P99, P99.9)"""
-    # 找出最大的 Producer 數量
-    max_p = get_max_producers_for_payload(data, target_payload)
+    """圖表 4: 延遲分佈長條圖"""
+    max_p = 0
+    # 找出該 payload 下最大的 P
+    sub = [d for d in data if d['payload_us'] == target_payload]
+    if sub: max_p = max(d['P'] for d in sub)
+    
     if max_p == 0: return
 
-    # 1. 初步過濾 (使用 P 判斷)
     raw_subset = [d for d in data if d['P'] == max_p and d['payload_us'] == target_payload]
-    
     if not raw_subset: return
 
-    # 2. 去除重複 (Deduplication)
+    # 去除重複
     unique_data = {}
-    for d in raw_subset:
-        unique_data[d['impl']] = d
-    
+    for d in raw_subset: unique_data[d['impl']] = d
     subset = sorted(unique_data.values(), key=lambda x: x['impl'])
     
-    # 3. 準備繪圖數據
     impls = [d['impl'] for d in subset]
     p50s = [d['p50'] for d in subset]
     p99s = [d['p99'] for d in subset]
@@ -174,20 +193,17 @@ def plot_latency_breakdown(data, target_payload):
     width = 0.25
 
     plt.figure(figsize=(10, 6))
-    
     plt.bar(x - width, p50s, width, label='P50 (Median)', alpha=0.9)
     plt.bar(x, p99s, width, label='P99', alpha=0.9)
     plt.bar(x + width, p999s, width, label='P99.9', alpha=0.9)
     
     plt.xlabel('Implementation')
     plt.ylabel('Latency (μs) - Log Scale')
-    # 標題顯示 P/C 配對
     plt.title(f'Latency Distribution\n(Threads={max_p}P/{max_p}C, Payload={target_payload}μs)')
     plt.xticks(x, impls)
     plt.legend()
     plt.yscale('log') 
     plt.grid(True, axis='y', which='both', alpha=0.3)
-    
     plt.tight_layout()
     plt.savefig(f"{RESULTS_DIR}/plot_latency_breakdown.png")
     print(f"✓ Saved {RESULTS_DIR}/plot_latency_breakdown.png")
@@ -197,15 +213,21 @@ def main():
     data = load_data()
     if not data: return
     
-    target_payload = detect_scalability_payload(data)
+    # 自動偵測兩種實驗的固定參數
+    scalability_payload = detect_scalability_payload(data)
+    sensitivity_threads = detect_sensitivity_threads(data)
     
-    if target_payload is None:
-        print("❌ Could not detect a valid payload for plotting.")
-        return
+    if scalability_payload is not None:
+        plot_scalability(data, scalability_payload)
+        plot_tail_latency(data, scalability_payload)
+        plot_latency_breakdown(data, scalability_payload)
+    else:
+        print("⚠ Not enough data to plot Scalability charts.")
 
-    plot_scalability(data, target_payload)
-    plot_tail_latency(data, target_payload)
-    plot_latency_breakdown(data, target_payload)
+    if sensitivity_threads is not None:
+        plot_payload_sensitivity(data, sensitivity_threads)
+    else:
+        print("⚠ Not enough data to plot Payload Sensitivity charts.")
     
     print("\n✅ All plots generated successfully!")
 
