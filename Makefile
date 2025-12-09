@@ -4,10 +4,10 @@ CXXFLAGS ?= -std=c++20 -O3 -pthread -latomic
 INCLUDES := -Iinclude
 
 # 用戶可選參數，預設為 0 (不開啟)
-# 使用方式: make ENABLE_POOL=1 ENABLE_BACKOFF=1 ENABLE_DEPTH=1
+# 使用方式: make ENABLE_POOL=1 ENABLE_BACKOFF=1
 ENABLE_POOL    ?= 0
 ENABLE_BACKOFF ?= 0
-ENABLE_DEPTH   ?= 0
+# ENABLE_DEPTH   ?= 0
 
 # 根據參數追加 CXXFLAGS
 ifeq ($(ENABLE_POOL), 1)
@@ -18,9 +18,9 @@ ifeq ($(ENABLE_BACKOFF), 1)
 	CXXFLAGS += -DLFQ_USE_BACKOFF
 endif
 
-ifeq ($(ENABLE_DEPTH), 1)
-	CXXFLAGS += -DBENCH_USE_DEPTH
-endif
+# ifeq ($(ENABLE_DEPTH), 1)
+# 	CXXFLAGS += -DBENCH_USE_DEPTH
+# endif
 
 BIN       := build
 RESULT    := results
