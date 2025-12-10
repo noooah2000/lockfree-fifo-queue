@@ -138,7 +138,7 @@ public:
                     // Jay: 可能不用 seq_cst，待驗證
                     //      可能 "非 x86" 平台需要
                     void* p = curr_rec->hp[i].load(std::memory_order_acquire);
-                    // void* p = curr->hp[i].load(std::memory_order_seq_cst);
+                    // void* p = curr_rec->hp[i].load(std::memory_order_seq_cst);
                     if (p) hazards.push_back(p);
                 }
             }

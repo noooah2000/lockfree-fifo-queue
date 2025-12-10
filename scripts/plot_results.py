@@ -10,6 +10,15 @@ from collections import defaultdict
 plt.style.use('ggplot') 
 RESULTS_DIR = "results"
 
+# 顏色定義：(NoPool/Malloc Color, Pool Color)
+# Malloc 用淺色/虛線，Pool 用深色/實線
+COLOR_MAP = {
+    'hp':    ('lightcoral', 'firebrick'),      # 紅色系
+    'ebr':   ('lightskyblue', 'navy'),         # 藍色系
+    'mutex': ('silver', 'dimgray'),            # 灰色系
+    'none':  ('lightgreen', 'darkgreen')       # 綠色系
+}
+
 def load_data():
     """讀取所有 CSV 檔案並解析數據"""
     data = []
@@ -21,83 +30,73 @@ def load_data():
     print(f"Loading {len(files)} CSV files...")
     
     for filename in files:
+        # 從檔名判斷是否為 Pool 模式
+        is_pool = "_pool_" in filename
+        mode_suffix = " (Pool)" if is_pool else " (Malloc)"
+        
         with open(filename, newline='') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    row = {k.strip(): v.strip() for k, v in row.items()}
+                    raw_impl = row['impl'].strip()
+                    # 顯示名稱：例如 "hp (Pool)"
+                    display_impl = raw_impl + mode_suffix
+                    
                     data.append({
-                        'impl': row['impl'],
+                        'raw_impl': raw_impl,         # 原始 key，用來查顏色
+                        'display_impl': display_impl, # 圖例顯示名稱
+                        'is_pool': is_pool,
                         'P': int(row['P']),
                         'C': int(row['C']),
                         'payload_us': int(row['payload_us']),
                         'throughput': float(row['throughput']),
-                        'avg_lat': float(row['avg_lat']) / 1000.0,
-                        'p50': float(row['p50']) / 1000.0,
+                        'p50': float(row['p50']) / 1000.0,   # 轉為微秒 (us)
                         'p99': float(row['p99']) / 1000.0,
                         'p999': float(row['p999']) / 1000.0,
                         'max_lat': float(row['max_lat']) / 1000.0
                     })
-                except (KeyError, ValueError):
+                except (KeyError, ValueError) as e:
+                    print(f"Skipping row in {filename}: {e}")
                     continue
     return data
 
-# ==========================================
-# 偵測邏輯
-# ==========================================
-
-def detect_scalability_payload(data):
-    """偵測用於 Scalability 測試的固定 Payload (尋找 P 變化最多的 Payload)"""
-    counts = defaultdict(set)
-    for d in data:
-        counts[d['payload_us']].add(d['P'])
+def get_style(raw_impl, is_pool):
+    """回傳 (color, linestyle, marker)"""
+    # 如果找不到 key，預設黑色
+    colors = COLOR_MAP.get(raw_impl, ('gray', 'black'))
     
-    best_payload = None
-    max_vars = -1
-    for p, p_set in counts.items():
-        if len(p_set) > max_vars:
-            max_vars = len(p_set)
-            best_payload = p
+    # 決定顏色
+    color = colors[1] if is_pool else colors[0]
     
-    if best_payload is not None:
-        print(f"🔍 [Scalability] Detected fixed Payload: {best_payload} μs (Varied threads)")
-    return best_payload
-
-def detect_sensitivity_threads(data):
-    """偵測用於 Payload 測試的固定執行緒數 (尋找 Payload 變化最多的 P)"""
-    counts = defaultdict(set)
-    for d in data:
-        counts[d['P']].add(d['payload_us'])
-        
-    best_p = None
-    max_vars = -1
-    for p, payload_set in counts.items():
-        if len(payload_set) > max_vars:
-            max_vars = len(payload_set)
-            best_p = p
-            
-    if best_p is not None:
-        print(f"🔍 [Sensitivity] Detected fixed Producer Count: {best_p} (Varied payloads)")
-    return best_p
+    # 決定線條與點
+    linestyle = '-' if is_pool else '--'  # Pool=實線, Malloc=虛線
+    marker = 'o' if is_pool else 'v'      # Pool=圓點, Malloc=倒三角
+    
+    return color, linestyle, marker
 
 # ==========================================
-# 繪圖函式
+# 1. Throughput Scalability (折線圖)
 # ==========================================
-
-def plot_scalability(data, target_payload):
-    """圖表 1: Producer 數 vs 吞吐量"""
+def plot_throughput_scalability(data, target_payload):
     subset = [d for d in data if d['payload_us'] == target_payload]
     if not subset: return
 
-    impls = set(d['impl'] for d in subset)
+    unique_labels = sorted(list(set(d['display_impl'] for d in subset)))
+    
     plt.figure(figsize=(10, 6))
-    markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
-
-    for impl in sorted(impls):
-        rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['P'])
+    
+    for label in unique_labels:
+        rows = sorted([d for d in subset if d['display_impl'] == label], key=lambda x: x['P'])
+        if not rows: continue
+        
+        raw_impl = rows[0]['raw_impl']
+        is_pool = rows[0]['is_pool']
+        color, ls, marker = get_style(raw_impl, is_pool)
+        
         x = [r['P'] for r in rows] 
-        y = [r['throughput'] / 1_000_000 for r in rows] 
-        plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), linewidth=2)
+        y = [r['throughput'] / 1_000_000 for r in rows] # 轉為 Million ops/sec
+        
+        plt.plot(x, y, label=label, color=color, linestyle=ls, marker=marker, linewidth=2, markersize=6)
 
     plt.title(f"Throughput Scalability (Fixed Payload={target_payload}μs)")
     plt.xlabel("Producer Threads (P=C)")
@@ -105,31 +104,117 @@ def plot_scalability(data, target_payload):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f"{RESULTS_DIR}/plot_throughput_scalability.png")
-    print(f"✓ Saved {RESULTS_DIR}/plot_throughput_scalability.png")
+    plt.savefig(f"{RESULTS_DIR}/1_throughput_scalability.png")
+    print(f"✓ Saved {RESULTS_DIR}/1_throughput_scalability.png")
     plt.close()
 
-def plot_payload_sensitivity(data, target_p):
-    """圖表 2 (新): Payload vs 吞吐量"""
-    subset = [d for d in data if d['P'] == target_p]
+# ==========================================
+# 2. Latency Scalability (折線圖)
+#    Tail Latency P99.9 vs Threads
+# ==========================================
+def plot_latency_scalability(data, target_payload):
+    subset = [d for d in data if d['payload_us'] == target_payload]
     if not subset: return
 
-    # 去除重複 (如果 matrix 跑了多次相同設定)
-    unique_data = {}
-    for d in subset:
-        key = (d['impl'], d['payload_us'])
-        unique_data[key] = d
-    subset = list(unique_data.values())
-
-    impls = set(d['impl'] for d in subset)
+    unique_labels = sorted(list(set(d['display_impl'] for d in subset)))
+    
     plt.figure(figsize=(10, 6))
-    markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
+    
+    for label in unique_labels:
+        rows = sorted([d for d in subset if d['display_impl'] == label], key=lambda x: x['P'])
+        if not rows: continue
+        
+        raw_impl = rows[0]['raw_impl']
+        is_pool = rows[0]['is_pool']
+        color, ls, marker = get_style(raw_impl, is_pool)
+        
+        x = [r['P'] for r in rows]
+        y = [r['p999'] for r in rows] # P99.9 in us
+        
+        plt.plot(x, y, label=label, color=color, linestyle=ls, marker=marker, linewidth=2)
 
-    for impl in sorted(impls):
-        rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['payload_us'])
+    plt.title(f"Tail Latency P99.9 (Fixed Payload={target_payload}μs)")
+    plt.xlabel("Producer Threads (P=C)")
+    plt.ylabel("Latency (μs) - Log Scale")
+    plt.yscale('log') # 使用對數坐標，因為 Mutex 通常會飆很高
+    plt.legend()
+    plt.grid(True, which="both", ls="-", alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(f"{RESULTS_DIR}/2_latency_scalability_p999.png")
+    print(f"✓ Saved {RESULTS_DIR}/2_latency_scalability_p999.png")
+    plt.close()
+
+# ==========================================
+# 3. Latency Distribution (長條圖)
+#    P50, P99, P99.9 breakdown for Max Threads
+# ==========================================
+def plot_latency_distribution(data, target_payload):
+    # 1. 找出最大的執行緒數 (Stress scenario)
+    subset_payload = [d for d in data if d['payload_us'] == target_payload]
+    if not subset_payload: return
+    max_p = max(d['P'] for d in subset_payload)
+    
+    # 2. 篩選數據
+    subset = [d for d in subset_payload if d['P'] == max_p]
+    
+    # 3. 排序：讓同一種實作的 Pool/Malloc 靠在一起
+    subset.sort(key=lambda x: (x['raw_impl'], x['is_pool']))
+    
+    labels = [d['display_impl'] for d in subset]
+    p50s = [d['p50'] for d in subset]
+    p99s = [d['p99'] for d in subset]
+    p999s = [d['p999'] for d in subset]
+    
+    x = np.arange(len(labels))
+    width = 0.25  # 每個柱子的寬度
+
+    plt.figure(figsize=(12, 6))
+    
+    # 繪製三組柱狀圖
+    plt.bar(x - width, p50s, width, label='P50 (Median)', color='skyblue', edgecolor='black')
+    plt.bar(x,        p99s, width, label='P99',          color='orange', edgecolor='black')
+    plt.bar(x + width, p999s, width, label='P99.9',        color='firebrick', edgecolor='black')
+    
+    plt.xlabel('Implementation')
+    plt.ylabel('Latency (μs) - Log Scale')
+    plt.title(f'Latency Distribution (High Contention: {max_p} Threads, {target_payload}μs Payload)')
+    plt.xticks(x, labels, rotation=15)
+    plt.legend()
+    plt.yscale('log') # 這裡也建議用 Log，才能看清 Mutex 和 Lock-Free 的差距
+    plt.grid(True, axis='y', which='both', alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(f"{RESULTS_DIR}/3_latency_distribution.png")
+    print(f"✓ Saved {RESULTS_DIR}/3_latency_distribution.png")
+    plt.close()
+
+# ==========================================
+# 4. Payload Sensitivity (折線圖)
+# ==========================================
+def plot_payload_sensitivity(data, target_p):
+    subset = [d for d in data if d['P'] == target_p]
+    if not subset: return
+    
+    # 簡單去重
+    unique_map = {}
+    for d in subset:
+        unique_map[(d['display_impl'], d['payload_us'])] = d
+    subset = list(unique_map.values())
+
+    unique_labels = sorted(list(set(d['display_impl'] for d in subset)))
+    plt.figure(figsize=(10, 6))
+
+    for label in unique_labels:
+        rows = sorted([d for d in subset if d['display_impl'] == label], key=lambda x: x['payload_us'])
+        if not rows: continue
+        
+        raw_impl = rows[0]['raw_impl']
+        is_pool = rows[0]['is_pool']
+        color, ls, marker = get_style(raw_impl, is_pool)
+
         x = [r['payload_us'] for r in rows]
         y = [r['throughput'] / 1_000_000 for r in rows]
-        plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), linewidth=2)
+        plt.plot(x, y, label=label, color=color, linestyle=ls, marker=marker, linewidth=2)
 
     plt.title(f"Payload Sensitivity (Fixed Threads={target_p}P/{target_p}C)")
     plt.xlabel("Payload Size (μs)")
@@ -137,97 +222,45 @@ def plot_payload_sensitivity(data, target_p):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f"{RESULTS_DIR}/plot_payload_sensitivity.png")
-    print(f"✓ Saved {RESULTS_DIR}/plot_payload_sensitivity.png")
+    plt.savefig(f"{RESULTS_DIR}/4_payload_sensitivity.png")
+    print(f"✓ Saved {RESULTS_DIR}/4_payload_sensitivity.png")
     plt.close()
 
-def plot_tail_latency(data, target_payload):
-    """圖表 3: Producer 數 vs P99.9 Latency"""
-    subset = [d for d in data if d['payload_us'] == target_payload]
-    if not subset: return
+# ==========================================
+# Main
+# ==========================================
 
-    impls = set(d['impl'] for d in subset)
-    plt.figure(figsize=(10, 6))
-    markers = {'hp': 'o', 'ebr': 's', 'mutex': 'x', 'none': '^'}
-    
-    for impl in sorted(impls):
-        rows = sorted([d for d in subset if d['impl'] == impl], key=lambda x: x['P'])
-        x = [r['P'] for r in rows]
-        y = [r['p999'] for r in rows]
-        plt.plot(x, y, label=impl, marker=markers.get(impl, 'o'), linewidth=2)
+def detect_scalability_payload(data):
+    """找出樣本數最多的 payload"""
+    counts = defaultdict(set)
+    for d in data: counts[d['payload_us']].add(d['P'])
+    if not counts: return None
+    return max(counts.items(), key=lambda x: len(x[1]))[0]
 
-    plt.title(f"Tail Latency P99.9 (Fixed Payload={target_payload}μs)")
-    plt.xlabel("Producer Threads (P=C)")
-    plt.ylabel("Latency (μs) - Log Scale")
-    plt.yscale('log')
-    plt.legend()
-    plt.grid(True, which="both", ls="-", alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(f"{RESULTS_DIR}/plot_latency_scalability.png")
-    print(f"✓ Saved {RESULTS_DIR}/plot_latency_scalability.png")
-    plt.close()
-
-def plot_latency_breakdown(data, target_payload):
-    """圖表 4: 延遲分佈長條圖"""
-    max_p = 0
-    # 找出該 payload 下最大的 P
-    sub = [d for d in data if d['payload_us'] == target_payload]
-    if sub: max_p = max(d['P'] for d in sub)
-    
-    if max_p == 0: return
-
-    raw_subset = [d for d in data if d['P'] == max_p and d['payload_us'] == target_payload]
-    if not raw_subset: return
-
-    # 去除重複
-    unique_data = {}
-    for d in raw_subset: unique_data[d['impl']] = d
-    subset = sorted(unique_data.values(), key=lambda x: x['impl'])
-    
-    impls = [d['impl'] for d in subset]
-    p50s = [d['p50'] for d in subset]
-    p99s = [d['p99'] for d in subset]
-    p999s = [d['p999'] for d in subset]
-    
-    x = np.arange(len(impls))
-    width = 0.25
-
-    plt.figure(figsize=(10, 6))
-    plt.bar(x - width, p50s, width, label='P50 (Median)', alpha=0.9)
-    plt.bar(x, p99s, width, label='P99', alpha=0.9)
-    plt.bar(x + width, p999s, width, label='P99.9', alpha=0.9)
-    
-    plt.xlabel('Implementation')
-    plt.ylabel('Latency (μs) - Log Scale')
-    plt.title(f'Latency Distribution\n(Threads={max_p}P/{max_p}C, Payload={target_payload}μs)')
-    plt.xticks(x, impls)
-    plt.legend()
-    plt.yscale('log') 
-    plt.grid(True, axis='y', which='both', alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(f"{RESULTS_DIR}/plot_latency_breakdown.png")
-    print(f"✓ Saved {RESULTS_DIR}/plot_latency_breakdown.png")
-    plt.close()
+def detect_sensitivity_threads(data):
+    """找出樣本數最多的 threads"""
+    counts = defaultdict(set)
+    for d in data: counts[d['P']].add(d['payload_us'])
+    if not counts: return None
+    return max(counts.items(), key=lambda x: len(x[1]))[0]
 
 def main():
     data = load_data()
     if not data: return
     
-    # 自動偵測兩種實驗的固定參數
-    scalability_payload = detect_scalability_payload(data)
-    sensitivity_threads = detect_sensitivity_threads(data)
+    # 自動偵測實驗參數
+    p_load = detect_scalability_payload(data)
+    p_threads = detect_sensitivity_threads(data)
     
-    if scalability_payload is not None:
-        plot_scalability(data, scalability_payload)
-        plot_tail_latency(data, scalability_payload)
-        plot_latency_breakdown(data, scalability_payload)
-    else:
-        print("⚠ Not enough data to plot Scalability charts.")
-
-    if sensitivity_threads is not None:
-        plot_payload_sensitivity(data, sensitivity_threads)
-    else:
-        print("⚠ Not enough data to plot Payload Sensitivity charts.")
+    print(f"Detected Base Parameters: Payload={p_load}us, Threads={p_threads}")
+    
+    if p_load is not None:
+        plot_throughput_scalability(data, p_load)
+        plot_latency_scalability(data, p_load)     # New!
+        plot_latency_distribution(data, p_load)    # New!
+    
+    if p_threads is not None:
+        plot_payload_sensitivity(data, p_threads)
     
     print("\n✅ All plots generated successfully!")
 

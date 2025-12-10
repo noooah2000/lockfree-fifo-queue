@@ -252,7 +252,7 @@ int main()
         // 使用更極端的參數來確保觸發 ABA
         // 16 Producers, 16 Consumers, 50000 Ops
         bool result = test_linearization<mpmcq::LockFreeQueue<std::pair<int, int>, UnsafeDirectReclamation>>(
-            "Unsafe ABA Test", 24, 24, 500000);
+            "Unsafe ABA Test", 32, 32, 500000);
 
         if (!result)
         {
