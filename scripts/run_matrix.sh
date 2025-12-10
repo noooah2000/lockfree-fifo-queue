@@ -18,11 +18,11 @@ MODES=("nopool" "pool")
 
 # 參數設定
 impls=("hp" "ebr" "none" "mutex")
-threads=(1 2 4 8 12 16 24)  # 執行緒數量矩陣
-fixed_payload=3             # Scalability 測試用的固定負載
-payloads=(0 1 2 3 4 5 6)    # Payload 測試用的固定負載
-duration=5                  # 執行時間
-warmup=1                    # 暖身時間
+threads=(1 2 3 5 7 9 11) # 模擬從低競爭到高競爭 (超過實體核數)
+fixed_payload=3           # 固定負載 (微秒)，模擬真實工作量
+payloads=(0 1 2 3 4 5 6)  # 測試不同負載對吞吐量的影響 (0=極限測試)
+duration=5                # 執行時間
+warmup=1                  # 暖身時間
 
 echo "=================================================="
 echo "Starting Benchmark Matrix (Pool vs No Pool)"

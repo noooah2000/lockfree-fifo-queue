@@ -10,6 +10,8 @@
 #include <algorithm> // for sort
 #include <numeric>   // for accumulate
 #include <iomanip>   // for setprecision
+#include <memory>
+#include <sys/resource.h>
 
 #include "queue/lockfree_queue.hpp"
 #include "queue/mutex_queue.hpp"
@@ -31,8 +33,8 @@ struct BenchmarkArgs
     int warmup_s = 1;
     int duration_s = 5;
     std::string csv_path = "";
-    bool measure_latency = true;
-    int sampling_rate = 1000; // 每 1000 次操作採樣一次 Latency
+    // bool measure_latency = true; (Noah: 每次都要採樣 那乾脆就不判斷了)
+    int sampling_rate = 1 << 10; // 每 1024 次操作採樣一次 Latency
 };
 
 struct ThreadResult
@@ -44,11 +46,8 @@ struct ThreadResult
 static void print_help()
 {
     std::cout <<
-        R"(Usage: bench_queue [--impl hp|ebr|none|mutex]
-                     [--producers P] [--consumers C]
-                     [--payload-us N] [--warmup S] [--duration S]
-                     [--csv path]
-)";
+        R"(Usage: bench_queue [--impl hp|ebr|none|mutex] [--producers P] [--consumers C]
+                              [--payload-us N] [--warmup S] [--duration S] [--csv path])";
 }
 
 static BenchmarkArgs parse_args(int argc, char **argv)
@@ -108,6 +107,21 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
     QueueType queue;
     std::atomic<bool> start_flag{false};
     std::atomic<bool> stop_signal{false};
+    
+    // [新增] 深度追蹤變數
+    // current_depth: 當前大概深度 (解析度為 sampling_rate)
+    // max_depth: 歷史最大深度
+    std::atomic<long long> current_depth{0};
+    std::atomic<long long> max_depth{0};
+
+    // [新增] 即時記分板：用來讓主執行緒隨時能看到消費者的進度
+    // 使用 unique_ptr 是為了避免 atomic 不可複製的問題，方便放進 vector
+    std::vector<std::unique_ptr<std::atomic<long long>>> consumer_progress;
+    std::vector<std::unique_ptr<std::atomic<long long>>>producer_progress;
+    for(int i=0; i < args.num_producers; ++i) 
+        producer_progress.push_back(std::make_unique<std::atomic<long long>>(0));
+    for(int i=0; i < args.num_consumers; ++i) 
+        consumer_progress.push_back(std::make_unique<std::atomic<long long>>(0));
 
     // 每個 Thread 的結果容器
     std::vector<ThreadResult> producer_results(args.num_producers);
@@ -117,13 +131,15 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
     {
         std::mt19937_64 rng(id + 100);
         long long local_ops = 0;
-        int ops_since_quiescent = 0;
+        std::atomic<long long>* my_progress = producer_progress[id].get();
+        int sampling_rate_mask = args.sampling_rate - 1;
 
+        // (Noah: 用不到)
         // 預先分配記憶體以避免測量時 allocation
-        if (args.measure_latency)
-        {
-            producer_results[id].latencies_ns.reserve(200000);
-        }
+        // if (args.measure_latency)
+        // {
+        //     producer_results[id].latencies_ns.reserve(200000);
+        // }
 
         // 等待開始信號 (Barrier)
         while (!start_flag.load(std::memory_order_acquire))
@@ -136,31 +152,34 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
             simulate_work(args.payload_us);
 
             // Latency Sampling Logic
-            if (args.measure_latency && (local_ops % args.sampling_rate == 0))
+            
+            // [優化] 移除所有 if/else 分支判斷
+            // 不管是否開啟 measure_latency，生產者只負責全速塞資料
+            // 這樣消除了取餘數 (%) 運算的開銷，讓壓力測試更純粹
+            if (queue.enqueue(std::pair<int, long long>{id, local_ops}))
             {
-                auto t1 = Clock::now();
-                bool res = queue.enqueue(std::pair<int, long long>{id, local_ops});
-                auto t2 = Clock::now();
-                if (res)
-                {
-                    producer_results[id].latencies_ns.push_back((t2 - t1).count());
-                    local_ops++;
-                }
-            }
-            else
-            {
-                // Fast path without timer
-                if (queue.enqueue(std::pair<int, long long>{id, local_ops}))
-                {
-                    local_ops++;
-                }
+                local_ops++;
             }
 
-            // Periodic quiescent for EBR/HP
-            if (++ops_since_quiescent >= 64)
+            // 批量處理：每 1024 次操作執行一次 (成本極低)
+            if ((local_ops & sampling_rate_mask) == 0)
             {
+                my_progress->store(local_ops, std::memory_order_relaxed);
+
+                // [新增] 批量增加深度 (一次加 sampling_rate) 注意：這裡有短暫的時間差誤差，但在大流量下可接受
+                long long old_depth = current_depth.fetch_add(args.sampling_rate, std::memory_order_relaxed);
+                long long new_depth = old_depth + args.sampling_rate;
+
+                // [新增] 更新最大深度 (CAS Loop)
+                long long prev_max = max_depth.load(std::memory_order_relaxed);
+                while (new_depth > prev_max && !max_depth.compare_exchange_weak(prev_max, 
+                                                                                new_depth, 
+                                                                                std::memory_order_relaxed)) 
+                {
+                    // 如果失敗，prev_max 會被更新為最新的值，迴圈重試
+                }   
+
                 QueueType::quiescent();
-                ops_since_quiescent = 0;
             }
         }
         producer_results[id].operations = local_ops;
@@ -170,13 +189,11 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
     {
         std::pair<int, long long> value;
         long long local_ops = 0;
-        int ops_since_quiescent = 0;
-
-        if (args.measure_latency)
-        {
-            consumer_results[id].latencies_ns.reserve(200000);
-        }
-
+        std::atomic<long long>* my_progress = consumer_progress[id].get();
+        int sampling_rate_mask = args.sampling_rate - 1;
+        consumer_results[id].latencies_ns.reserve(200000);
+        
+        
         while (!start_flag.load(std::memory_order_acquire))
         {
             cpu_relax();
@@ -187,7 +204,7 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
             bool res = false;
 
             // Latency Sampling Logic
-            if (args.measure_latency && (local_ops % args.sampling_rate == 0))
+            if ((local_ops & sampling_rate_mask) == 0)
             {
                 auto t1 = Clock::now();
                 res = queue.try_dequeue(value);
@@ -196,7 +213,12 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
                 {
                     consumer_results[id].latencies_ns.push_back((t2 - t1).count());
                     local_ops++;
+                    my_progress->store(local_ops, std::memory_order_relaxed);
+                    // [新增] 批量扣除深度
+                    current_depth.fetch_sub(args.sampling_rate, std::memory_order_relaxed);
+
                     simulate_work(args.payload_us);
+                    QueueType::quiescent();
                 }
             }
             else
@@ -209,16 +231,7 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
                 }
             }
 
-            if (!res)
-            {
-                std::this_thread::yield();
-            }
-
-            if (++ops_since_quiescent >= 64)
-            {
-                QueueType::quiescent();
-                ops_since_quiescent = 0;
-            }
+            if (!res) std::this_thread::yield();
         }
         consumer_results[id].operations = local_ops;
     };
@@ -235,66 +248,14 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
     start_flag.store(true, std::memory_order_release);
     std::this_thread::sleep_for(std::chrono::seconds(args.warmup_s));
 
-    // Reset counters (其實不需要 reset，我們可以用 diff，但為了簡單，我們重啟這段測量比較乾淨)
-    // 為了真正隔離 Warmup 影響，嚴謹的做法是 Warmup 後歸零。
-    // 但因為我們使用了 thread local 變數且還沒開始存 latency (假設 warmup 期間不紀錄)，
-    // 這裡我們簡單做：停止現在的，重新計算。
-    // **修正**：上面的代碼會在 warmup 時也記錄 latency。
-    // 為了簡化邏輯：我們讓 warmup 和正式執行混在一起，最後只算 throughput，
-    // 或者我們接受 warmup 的數據也會進去。
-    //
-    // **更好的做法**：
-    // 在這裡我們暫停一下，清空 vector 和 count，再開始計時。
-    // 但要在多執行緒下「暫停並清空」很難同步。
-    // 所以常見做法是：忽略 Warmup 期間的數據，或是 Warmup 就單純跑幾秒，
-    // 然後我們在程式內部用一個 flag 控制「開始記錄」。
-    //
-    // 這裡採用「簡單粗暴法」：Warmup 其實已經跑在 start_flag = true 之後了。
-    // 我們可以選擇「不重置」，直接測量 (Warmup + Run) 的總時間，或者重寫邏輯。
-    //
-    // 為了精確度，我將採用「捨棄前 N 秒數據」的邏輯比較困難，
-    // 所以我們改為：Warmup 結束後，記錄當前的時間點和 count，作為 "Base"，
-    // 結束時減去這個 Base。
-
     // 收集 Warmup 結束時的快照
-    long long warmup_ops_p = 0;
-    long long warmup_ops_c = 0;
-    // 這裡沒辦法簡單取得所有 thread 的 local 變數而不暫停它們。
-    // 所以，我們改變策略：Warmup 只是為了讓 Cache 熱起來。
-    // 我們讓上面的 Loop 繼續跑，但我們只在主執行緒 sleep。
-    // 真正的 throughput 計算我們使用 "Window" 方式不太容易。
-    //
-    // **最終決定策略**：
-    // 為了不讓程式碼太複雜，我們接受 Warmup 期間的 Latency 數據也會被採樣進去。
-    // 但這對 "Tail Latency" 影響不大。
-    // 對於 Throughput，我們使用 std::this_thread::sleep 作為測量區間是不準的。
-    //
-    // 改良版邏輯：
-    // 1. 啟動所有 Threads, start_flag = true
-    // 2. sleep(warmup)
-    // 3. reset_stats_flag = true (告訴 threads 清空數據? 不，這太慢)
-    // 4. 正確做法：Benchmarks 通常是 "Run for X seconds"，不區分 warmup 階段的數據，
-    //    或者在啟動前先跑一段獨立的 warmup loop。
-
-    // 讓我們保持簡單：
-    // 目前的架構是 start_flag 一開就開始跑。
-    // 我們可以讓 throughput 包含 warmup，或者忽視它。
-    // 鑑於作業需求，我們維持原樣：sleep(warmup) 只是讓系統穩定，
-    // 然後我們開始計時，sleep(duration)，結束。
-    // 這樣 Throughput = (Total Ops) / (Warmup + Duration)。
-    // 雖然包含了 Warmup 的低速期，但如果 Warmup 時間短，影響可接受。
-
-    // 但為了更專業一點，我會在下面只計算 duration 期間的 throughput。
-    // 透過在 Warmup 結束瞬間，讀取一次全域進度？不，沒全域變數了。
-    //
-    // **妥協方案**：
-    // 讓 Warmup 獨立執行。
-    // 也就是先跑一個 Warmup Loop，Join，然後再跑正式 Loop。
-    // 但這樣會有 Thread 建立銷毀的開銷。
-    //
-    // 回到最優解：
-    // 忽略 Warmup 的精確隔離。直接測量整個區間。
-    // 只要 Warmup 時間相對於 Duration 很短 (例如 0.5s vs 5s)，差異不大。
+    long long warmup_ops_producer = 0;
+    long long warmup_ops_consumer = 0;
+    for(const auto& prog : producer_progress) 
+        warmup_ops_producer += prog->load(std::memory_order_relaxed);
+    for(const auto& prog : consumer_progress) 
+        warmup_ops_consumer += prog->load(std::memory_order_relaxed);
+    
 
     std::cout << "Running benchmark for " << args.duration_s << "s..." << std::endl;
     auto time_start = Clock::now();
@@ -304,9 +265,20 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
     stop_signal.store(true, std::memory_order_release);
     queue.close();
 
-    for (auto &t : threads)
+    for (auto &t : threads) t.join();
+
+    // --------------------------------------------------------
+    // [新增] 測量記憶體峰值 (Memory Peak)
+    // --------------------------------------------------------
+    long peak_mem_kb = 0;
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) 
     {
-        t.join();
+        peak_mem_kb = usage.ru_maxrss; // Linux: KB, macOS: Bytes (通常)
+        // 注意：不同 OS 對 ru_maxrss 的單位定義不同，Linux 通常是 KB
+        #ifdef __APPLE__
+            peak_mem_kb /= 1024; // macOS 轉為 KB
+        #endif
     }
     
     // 4. 統計數據
@@ -316,19 +288,19 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
     all_latencies.reserve(1000000);
 
     for (const auto &r : producer_results)
+    {
         total_ops_producer += r.operations;
-
+    }    
     for (const auto &r : consumer_results)
     {
         total_ops_consumer += r.operations;
         all_latencies.insert(all_latencies.end(), r.latencies_ns.begin(), r.latencies_ns.end());
     }
 
-    double duration_sec = std::chrono::duration<double>(time_end - time_start).count() + args.warmup_s;
-    // 修正：因為我們是從 start_flag = true 就開始跑，所以總時間是 warmup + duration
+    double duration_sec = std::chrono::duration<double>(time_end - time_start).count();
 
-    double throughput_producer = total_ops_producer / duration_sec;
-    double throughput_consumer = total_ops_consumer / duration_sec;
+    double throughput_consumer = (total_ops_consumer - warmup_ops_consumer) / duration_sec;
+    double throughput_producer = (total_ops_producer - warmup_ops_producer) / duration_sec;
 
     // 5. 計算 Latency Percentiles
     std::sort(all_latencies.begin(), all_latencies.end());
@@ -344,8 +316,8 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
     };
 
     long long p50 = get_percentile(50.0);
+    long long p95 = get_percentile(95.0);
     long long p99 = get_percentile(99.0);
-    long long p999 = get_percentile(99.9);
     long long max_lat = all_latencies.empty() ? 0 : all_latencies.back();
     double avg_lat = 0;
     if (!all_latencies.empty())
@@ -362,12 +334,17 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
         std::cout << "Impl: " << impl_name << "\n";
         std::cout << "Threads: " << args.num_producers << "P / " << args.num_consumers << "C\n";
         std::cout << "Time: " << duration_sec << "s\n";
+        std::cout << "Throughput (Prod): " << std::fixed << std::setprecision(0) << throughput_producer << " ops/sec\n";
         std::cout << "Throughput (Cons): " << std::fixed << std::setprecision(0) << throughput_consumer << " ops/sec\n";
         std::cout << "Latency (ns): Avg=" << std::setprecision(1) << avg_lat
                   << ", P50=" << p50
-                  << ", P99=" << p99
-                  << ", P99.9=" << p999
+                  << ", p95=" << p95
+                  << ", p99=" << p99
                   << ", Max=" << max_lat << "\n";
+        std::cout << "Max Depth (Approx): " << max_depth.load() << "\n";
+        std::cout << "Peak Memory: " << peak_mem_kb / 1024.0 << " MB\n";
+        std::cout << "Producer Total: "<< total_ops_producer 
+                  << ", Consumer Total: " << total_ops_consumer << "\n";
     }
     else
     {
@@ -377,16 +354,18 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
             fseek(f, 0, SEEK_END);
             if (ftell(f) == 0)
             {
-                std::fprintf(f, "impl,P,C,payload_us,throughput,avg_lat,p50,p99,p999,max_lat\n");
+                std::fprintf(f, "impl,P,C,payload_us,throughput_prod,throughput_cons,avg_lat,p50,p95,p99,max_lat,max_depth,peak_mem_kb\n");
             }
 
-            std::fprintf(f, "%s,%d,%d,%d,%.2f,%.2f,%lld,%lld,%lld,%lld\n",
+            std::fprintf(f, "%s,%d,%d,%d,%.2f,%.2f,%.2f,%lld,%lld,%lld,%lld,%lld,%ld\n",
                          impl_name,
                          args.num_producers,
                          args.num_consumers,
                          args.payload_us,
+                         throughput_producer,
                          throughput_consumer,
-                         avg_lat, p50, p99, p999, max_lat);
+                         avg_lat, p50, p95, p99, max_lat,
+                         max_depth.load(), peak_mem_kb);
             std::fclose(f);
             std::cout << "Wrote CSV: " << args.csv_path << "\n";
         }
