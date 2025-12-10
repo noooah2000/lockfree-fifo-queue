@@ -195,7 +195,7 @@ public:
 
     bool enqueue(const T& v) 
     {
-        auto token = Reclaimer::enter();
+        [[maybe_unused]] auto token = Reclaimer::enter();
         if (is_closed()) return false;
         Node* new_node = new Node(v);
         SimpleBackoff bk;
@@ -241,7 +241,7 @@ public:
 
     bool try_dequeue(T& out)
     {
-        auto token = Reclaimer::enter();
+        [[maybe_unused]] auto token = Reclaimer::enter();
         SimpleBackoff bk;
         for (;;)
         {
@@ -272,6 +272,7 @@ public:
             if (head_next == nullptr)
             {
                 Reclaimer::protect_at(0, nullptr); // 離開前清除保護
+                Reclaimer::protect_at(1, nullptr); // 把舊的 head_next 也順便清掉
                 return false;
             }
             
@@ -287,6 +288,7 @@ public:
                 continue; // 重試
             }
 
+            // 這種情況發生在另一個執行緒（生產者, Enqueuer）剛剛完成 enqueue 的第一步，但還沒做第二步
             if (curr_head == curr_tail)
             {
                 Node* expected_tail = curr_tail;
@@ -295,9 +297,9 @@ public:
                                               std::memory_order_release, 
                                               std::memory_order_relaxed);
                 bk.pause();
-                 // 重試前清除保護(雖然不清除也行，但習慣好)
-                Reclaimer::protect_at(0, nullptr);
-                Reclaimer::protect_at(1, nullptr); 
+                 // 重試前清除保護(雖然不清除也行，但習慣好)(Noah: 我先註解掉這 統一重試邏輯)
+                // Reclaimer::protect_at(0, nullptr);
+                // Reclaimer::protect_at(1, nullptr); 
                 continue;
             }
 
@@ -311,6 +313,7 @@ public:
             {            
                 // 成功推進 head，可以回收舊 head
                 Reclaimer::protect_at(0, nullptr); // 成功 dequeue，自己不用保護了
+                Reclaimer::protect_at(1, nullptr); 
                 Reclaimer::retire(curr_head);              // 丟給回收員
                 return true;
             }

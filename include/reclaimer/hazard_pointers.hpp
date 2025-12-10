@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <mutex>
 #include <algorithm> // for std::sort, std::binary_search
-#include <iostream>
 
 namespace mpmcq::reclaimer
 {
@@ -19,7 +18,7 @@ constexpr int HP_RETIRE_THRESHOLD = 128;
 struct alignas(64) HPRecType 
 {
     std::atomic<void*> hp[HP_COUNT_PER_THREAD];
-    std::atomic<bool> active{false};
+    std::atomic<bool> is_acquired{false};
     HPRecType* next{nullptr};
 
     HPRecType() 
@@ -34,10 +33,10 @@ struct alignas(64) HPRecType
 class HazardPointerManager
 {
 public:
-    static HazardPointerManager &instance()
+    static HazardPointerManager& instance()
     {
-        static HazardPointerManager mgr;
-        return mgr;
+        static HazardPointerManager central_reclaimer;
+        return central_reclaimer;
     }
 
     // 待回收節點的封裝
@@ -53,9 +52,9 @@ public:
         HPRecType* my_rec = nullptr;    // 指向全域鏈表中的自己的 Record
         std::vector<RetiredNode> retire_list; 
 
-        ThreadContext(HazardPointerManager& mgr) 
+        ThreadContext(HazardPointerManager& central_reclaimer) 
         {
-            my_rec = mgr.acquire_record();
+            my_rec = central_reclaimer.acquire_record();
         }
 
         ~ThreadContext() 
@@ -71,7 +70,7 @@ public:
         }
     };
 
-    static ThreadContext &get_context()
+    static ThreadContext& get_context()
     {
         thread_local ThreadContext ctx(instance());
         return ctx;
@@ -102,10 +101,11 @@ public:
     void retire_node(T *ptr) noexcept
     {
         auto &ctx = get_context();
-        ctx.retire_list.push_back({
-            static_cast<void*>(ptr),
-            [](void* p) { delete static_cast<T*>(p); } // 這會呼叫 T 的 operator delete (Object Pool)
-        });
+
+        RetiredNode node_to_retire;
+        node_to_retire.ptr = static_cast<void*>(ptr);
+        node_to_retire.deleter = [](void* p) {delete static_cast<T*>(p);};
+        ctx.retire_list.push_back(node_to_retire);
 
         if (ctx.retire_list.size() >= HP_RETIRE_THRESHOLD)
         {
@@ -124,10 +124,12 @@ public:
         hazards.reserve(HP_COUNT_PER_THREAD * 16); 
 
         // 遍歷全域鏈表 (這是一個簡單的 Lock-Free 遍歷，因為我們只append不delete節點)
-        HPRecType* curr = head_rec_.load(std::memory_order_acquire);
-        while (curr) {
-            if (curr->active.load(std::memory_order_acquire)) {
-                for (int i = 0; i < HP_COUNT_PER_THREAD; ++i) {
+        HPRecType* curr_rec = head_rec_.load(std::memory_order_acquire);
+        while (curr_rec) {
+            if (curr_rec->is_acquired.load(std::memory_order_acquire)) 
+            {
+                for (int i = 0; i < HP_COUNT_PER_THREAD; ++i) 
+                {
                     // 如果缺少中間的 Fence (或 seq_cst 操作)，
                     // Reader 可能先讀取 Head 確認有效，然後才公告 HP。
                     // 而在這微小的時間差內，Reclaimer 可能已經讀取了 HP (發現沒人看) 並刪除了節點。
@@ -135,12 +137,12 @@ public:
 
                     // Jay: 可能不用 seq_cst，待驗證
                     //      可能 "非 x86" 平台需要
-                    void* p = curr->hp[i].load(std::memory_order_acquire);
+                    void* p = curr_rec->hp[i].load(std::memory_order_acquire);
                     // void* p = curr->hp[i].load(std::memory_order_seq_cst);
                     if (p) hazards.push_back(p);
                 }
             }
-            curr = curr->next;
+            curr_rec = curr_rec->next;
         }
 
         // 階段二：排序，以便二分搜尋
@@ -151,14 +153,19 @@ public:
         std::vector<RetiredNode>& list = ctx.retire_list;
         
         size_t kept_count = 0;
-        for (size_t i = 0; i < list.size(); ++i) {
+        for (size_t i = 0; i < list.size(); ++i) 
+        {
             // 如果此節點存在於 hazards 中 -> 不能刪 -> 保留
-            if (std::binary_search(hazards.begin(), hazards.end(), list[i].ptr)) {
-                if (i != kept_count) {
+            if (std::binary_search(hazards.begin(), hazards.end(), list[i].ptr)) 
+            {
+                if (i != kept_count) 
+                {
                     list[kept_count] = list[i];
                 }
                 kept_count++;
-            } else {
+            } 
+            else 
+            {
                 // 沒人看 -> 安全 -> 刪除 (歸還給 Pool)
                 list[i].deleter(list[i].ptr);
             }
@@ -169,40 +176,51 @@ public:
     }
 
     // 輔助：申請一個 HP Record (重複利用或新增)
-    HPRecType* acquire_record() {
-        // 1. 嘗試在鏈表中找一個沒在用的 (active == false)
-        HPRecType* curr = head_rec_.load(std::memory_order_acquire);
-        while (curr) {
-            if (!curr->active.load(std::memory_order_acquire)) {
+    HPRecType* acquire_record() 
+    {
+        // 1. 嘗試在鏈表中找一個沒在用的 (is_acquired == false)
+        HPRecType* curr_rec = head_rec_.load(std::memory_order_acquire);
+        while (curr_rec) 
+        {
+            if (!curr_rec->is_acquired.load(std::memory_order_acquire)) 
+            {
                 bool expected = false;
-                if (curr->active.compare_exchange_strong(expected, true, std::memory_order_seq_cst)) {
-                    return curr;
+                if (curr_rec->is_acquired.compare_exchange_strong(expected, 
+                                                         true, 
+                                                         std::memory_order_seq_cst)) 
+                {
+                    return curr_rec;
                 }
             }
-            curr = curr->next;
+            curr_rec = curr_rec->next;
         }
 
         // 2. 沒找到，new 一個新的並掛到鏈表頭部
         // 注意：這裡會有微小的記憶體洩漏 (Rec 節點本身只增不減)，但這在 HP 算法中是標準做法
         HPRecType* new_rec = new HPRecType();
-        new_rec->active.store(true, std::memory_order_relaxed);
+        new_rec->is_acquired.store(true, std::memory_order_relaxed);
         
         // CAS Loop 插入鏈表頭
         HPRecType* old_head = head_rec_.load(std::memory_order_relaxed);
         do {
             new_rec->next = old_head;
-        } while (!head_rec_.compare_exchange_weak(old_head, new_rec, std::memory_order_release, std::memory_order_relaxed));
+        } while (!head_rec_.compare_exchange_weak(old_head, new_rec, 
+                                                  std::memory_order_release, 
+                                                  std::memory_order_relaxed));
 
         return new_rec;
     }
 
     // 輔助：釋放 Record (標記為不活躍)
-    void release_record(HPRecType* rec) {
+    void release_record(HPRecType* rec) 
+    {
         // 清空指針
         for (int i = 0; i < HP_COUNT_PER_THREAD; ++i)
+        {
             rec->hp[i].store(nullptr, std::memory_order_release);
+        }
         // 標記為可重用
-        rec->active.store(false, std::memory_order_release);
+        rec->is_acquired.store(false, std::memory_order_release);
     }
 
 private:
