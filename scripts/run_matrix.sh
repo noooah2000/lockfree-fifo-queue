@@ -19,7 +19,7 @@ MODES=("nopool" "pool")
 # 參數設定
 impls=("hp" "ebr" "none" "mutex")
 threads=(1 2 4 8 12 16 24)  # 執行緒數量矩陣
-fixed_payload=2             # Scalability 測試用的固定負載
+fixed_payload=3             # Scalability 測試用的固定負載
 payloads=(0 1 2 3 4 5 6)    # Payload 測試用的固定負載
 duration=5                  # 執行時間
 warmup=1                    # 暖身時間
