@@ -7,6 +7,23 @@
 #include <vector>
 #include <mutex>
 
+// ==========================================
+// 自動偵測 ASan 並定義 Poisoning 巨集
+// ==========================================
+#ifndef __has_feature
+    #define __has_feature(x) 0
+#endif
+#if defined(__SANITIZE_ADDRESS__) || __has_feature(address_sanitizer)
+    #include <sanitizer/asan_interface.h>
+    // 當節點被回收時，標記為中毒 (不可存取)
+    #define ASAN_POISON_NODE(ptr, size) ASAN_POISON_MEMORY_REGION(ptr, size)
+    // 當節點被分配時，解毒 (可以存取)
+    #define ASAN_UNPOISON_NODE(ptr, size) ASAN_UNPOISON_MEMORY_REGION(ptr, size)
+#else
+    #define ASAN_POISON_NODE(ptr, size)
+    #define ASAN_UNPOISON_NODE(ptr, size)
+#endif
+
 // 檢查 C++ 標準，需要 C++17
 #if __cplusplus < 201703L
     #error "This header requires C++17 or later (use -std=c++17)"
@@ -62,13 +79,28 @@ struct SimpleBackoff
 template <typename Node>
 class NodePool 
 {
+    // 前置宣告
+    struct LocalBuffer;
+
+    // [新增 1] 用一個指標來追蹤 local_pool 是否還活著
+    // 預設為 nullptr，只有當 LocalBuffer 建構時才會指向自己，解構時歸零
+    inline static thread_local LocalBuffer* local_pool_ptr = nullptr;
+
     // 1. 定義一個內部類別來管理本地緩衝區
     struct LocalBuffer 
     {
         std::vector<Node*> vec;
-        // 解構子：當執行緒結束時自動執行
+        
+        // [新增 2] 建構時註冊自己
+        LocalBuffer() {
+            local_pool_ptr = this;
+        }
+
+        // [新增 3] 解構時註銷自己
         ~LocalBuffer() 
         {
+            local_pool_ptr = nullptr; // 標記為已死亡
+            
             if (!vec.empty())
             {
                 // 把私房錢歸還給全域池 (讓其他執行緒重用)
@@ -82,7 +114,7 @@ class NodePool
     };
 
 public:
-    // 2. 將原本直接宣告 vector 改為宣告這個 Wrapper
+    // 將原本直接宣告 vector 改為宣告這個 Wrapper
     // 注意：這裡是 thread_local，每個執行緒都有一個獨立的 LocalBuffer 物件
     inline static thread_local LocalBuffer local_pool;
     inline static std::mutex global_pool_mutex;
@@ -90,11 +122,13 @@ public:
 
     static Node* allocate() 
     {
-        // 改用 local_pool.vec 來存取 vector
+        // 這裡直接使用 local_pool 物件，確保它被初始化
+        // (Accessing local_pool forces construction, which sets local_pool_ptr)
         if (!local_pool.vec.empty()) 
         {
             Node* new_node = local_pool.vec.back();
             local_pool.vec.pop_back();
+            ASAN_UNPOISON_NODE(new_node, sizeof(Node));    // 告訴 ASan 這塊記憶體現在可以合法使用了: 解毒 (Unpoison)
             return new_node;
         }
 
@@ -118,6 +152,7 @@ public:
         {
             Node* new_node = local_pool.vec.back();
             local_pool.vec.pop_back();
+            ASAN_UNPOISON_NODE(new_node, sizeof(Node));    // 告訴 ASan 這塊記憶體現在可以合法使用了: 解毒 (Unpoison)
             return new_node;
         }
         
@@ -127,23 +162,31 @@ public:
 
     static void deallocate(Node* recycled_node) 
     {
-        // 多此一舉 先註解掉
-        // 重置 next 指標，防止髒數據
-        // recycled_node->next.store(nullptr, std::memory_order_relaxed);
-        
-        // 如果本地積太多 (>64)，還一半給全域
-        // 改用 local_pool.vec
-        if (local_pool.vec.size() > 64) 
+        // [新增 4] 檢查 Pool 是否還活著
+        if (local_pool_ptr) 
         {
-            std::lock_guard<std::mutex> lock(global_pool_mutex);
-            for (int i=0; i<32; ++i) 
+            // Pool 活著：正常回收
+            
+            // 如果本地積太多 (>64)，還一半給全域
+            if (local_pool_ptr->vec.size() > 64) 
             {
-                global_pool.push_back(local_pool.vec.back());
-                local_pool.vec.pop_back();
+                std::lock_guard<std::mutex> lock(global_pool_mutex);
+                for (int i=0; i<32; ++i) 
+                {
+                    global_pool.push_back(local_pool_ptr->vec.back());
+                    local_pool_ptr->vec.pop_back();
+                }
             }
+            // 放回本地
+            local_pool_ptr->vec.push_back(recycled_node);
+            ASAN_POISON_NODE(recycled_node, sizeof(Node));     // 告訴 ASan 這塊記憶體現在是「有毒」的，誰讀寫就報錯
         }
-        // 放回本地
-        local_pool.vec.push_back(recycled_node);
+        else 
+        {
+            // Pool 已死 (執行緒正在結束)：
+            // 不要再存取 local_pool 了，直接還給作業系統
+            ::operator delete(recycled_node);
+        }
     }
 };
 
@@ -203,9 +246,27 @@ public:
         for (;;) 
         {
             Node* curr_tail = tail_.load(std::memory_order_acquire);
+            
+            // Enqueue 也必須保護 curr_tail
+            // 因為在這個瞬間，curr_tail 可能已經被別人變成 head 並且 pop 掉回收了
+            Reclaimer::protect_at(0, curr_tail);
+
+            // [Fix] 驗證：確保保護生效時，tail 還是同一個
+            if (curr_tail != tail_.load(std::memory_order_acquire)) 
+            {
+                // 如果變了，代表我們的保護可能太晚了，重來
+                continue;
+            }
+
+            // 現在可以安全地讀取 next 了，因為 curr_tail 被 HP 保護著
             Node* tail_next = curr_tail->next.load(std::memory_order_acquire);
 
-            if (is_closed()) { delete new_node; return false; }
+            if (is_closed()) 
+            { 
+                Reclaimer::protect_at(0, nullptr); // 離開前記得清除
+                delete new_node; 
+                return false; 
+            }
 
             if (curr_tail == tail_.load(std::memory_order_acquire)) 
             {
@@ -222,6 +283,9 @@ public:
                                                             new_node,
                                                             std::memory_order_release, 
                                                             std::memory_order_relaxed);
+                        
+                        // 成功後清除保護
+                        Reclaimer::protect_at(0, nullptr);
                         return true;
                     }
                 } 
@@ -266,8 +330,7 @@ public:
             Node* head_next = curr_head->next.load(std::memory_order_acquire);
             
             // 注意：這裡 next 也要保護嗎？
-            // M&S Queue 的演算法特性是只要保護 Head 即可安全讀取 next
-            // 因為如果 Head 沒變，Head 節點就不會被釋放，next 也就是安全的。
+            // 要
             
             if (head_next == nullptr)
             {
@@ -276,11 +339,11 @@ public:
                 return false;
             }
             
-            // 2. [新增] 保護 Next 節點
+            // 2. 保護 Next 節點
             // 在讀取 value 之前，必須確保 next 節點不會被釋放
             Reclaimer::protect_at(1, head_next);
 
-            // 3. [新增] 關鍵二次檢查
+            // 3. 關鍵二次檢查
             // 我們保護了 head_next，但在保護指令生效前，head_next 可能已經被刪除了。
             // 只要確認 head 仍然是 curr_head，根據佇列特性，head 的 next 就必定還沒被完全 pop 出去。
             if (curr_head != head_.load(std::memory_order_acquire))
@@ -297,7 +360,8 @@ public:
                                               std::memory_order_release, 
                                               std::memory_order_relaxed);
                 bk.pause();
-                 // 重試前清除保護(雖然不清除也行，但習慣好)(Noah: 我先註解掉這 統一重試邏輯)
+                // 重試前清除保護(雖然不清除也行，但習慣好)
+                // (Noah: 我先註解掉這 統一重試邏輯)
                 // Reclaimer::protect_at(0, nullptr);
                 // Reclaimer::protect_at(1, nullptr); 
                 continue;
