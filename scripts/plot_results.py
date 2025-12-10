@@ -13,10 +13,17 @@ RESULTS_DIR = "results"
 # 顏色定義：(NoPool/Malloc Color, Pool Color)
 # Malloc 用淺色/虛線，Pool 用深色/實線
 COLOR_MAP = {
-    'hp':    ('lightcoral', 'firebrick'),      # 紅色系
-    'ebr':   ('lightskyblue', 'navy'),         # 藍色系
-    'mutex': ('silver', 'dimgray'),            # 灰色系
-    'none':  ('lightgreen', 'darkgreen')       # 綠色系
+    # 對應 benchmark_main.cpp 的輸出字串
+    'HazardPointer': ('lightcoral', 'firebrick'),      # HP: 紅色系
+    'EBR':           ('lightskyblue', 'navy'),         # EBR: 藍色系
+    'MutexQueue':    ('silver', 'dimgray'),            # Mutex: 灰色系
+    'NoReclamation': ('lightgreen', 'darkgreen'),      # NoReclaim: 綠色系
+    
+    # 保留簡寫 (以防萬一)
+    'hp':            ('lightcoral', 'firebrick'),
+    'ebr':           ('lightskyblue', 'navy'),
+    'mutex':         ('silver', 'dimgray'),
+    'none':          ('lightgreen', 'darkgreen')
 }
 
 def load_data():
@@ -62,15 +69,15 @@ def load_data():
 
 def get_style(raw_impl, is_pool):
     """回傳 (color, linestyle, marker)"""
-    # 如果找不到 key，預設黑色
-    colors = COLOR_MAP.get(raw_impl, ('gray', 'black'))
+    # 嘗試取得顏色，若找不到 (KeyMismatch) 則回傳明顯的 Magenta (洋紅色) 以便除錯
+    colors = COLOR_MAP.get(raw_impl, ('magenta', 'darkmagenta'))
     
-    # 決定顏色
+    # 決定顏色 (Malloc用淺色，Pool用深色)
     color = colors[1] if is_pool else colors[0]
     
-    # 決定線條與點
-    linestyle = '-' if is_pool else '--'  # Pool=實線, Malloc=虛線
-    marker = 'o' if is_pool else 'v'      # Pool=圓點, Malloc=倒三角
+    # 決定線條與點 (Pool=實線/圓點, Malloc=虛線/倒三角)
+    linestyle = '-' if is_pool else '--'  
+    marker = 'o' if is_pool else 'v'      
     
     return color, linestyle, marker
 
@@ -96,7 +103,10 @@ def plot_throughput_scalability(data, target_payload):
         x = [r['P'] for r in rows] 
         y = [r['throughput'] / 1_000_000 for r in rows] # 轉為 Million ops/sec
         
-        plt.plot(x, y, label=label, color=color, linestyle=ls, marker=marker, linewidth=2, markersize=6)
+        # linewidth 設定：Pool 稍微粗一點，突顯重點
+        lw = 2.5 if is_pool else 1.5
+        
+        plt.plot(x, y, label=label, color=color, linestyle=ls, marker=marker, linewidth=lw, markersize=6, alpha=0.8)
 
     plt.title(f"Throughput Scalability (Fixed Payload={target_payload}μs)")
     plt.xlabel("Producer Threads (P=C)")
@@ -131,19 +141,20 @@ def plot_latency_scalability(data, target_payload):
         x = [r['P'] for r in rows]
         y = [r['p999'] for r in rows] # P99.9 in us
         
-        plt.plot(x, y, label=label, color=color, linestyle=ls, marker=marker, linewidth=2)
+        lw = 2.5 if is_pool else 1.5
+
+        plt.plot(x, y, label=label, color=color, linestyle=ls, marker=marker, linewidth=lw, alpha=0.8)
 
     plt.title(f"Tail Latency P99.9 (Fixed Payload={target_payload}μs)")
     plt.xlabel("Producer Threads (P=C)")
     plt.ylabel("Latency (μs) - Log Scale")
-    plt.yscale('log') # 使用對數坐標，因為 Mutex 通常會飆很高
-    plt.legend()
+    plt.yscale('log') # 使用對數坐標
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.grid(True, which="both", ls="-", alpha=0.5)
     plt.tight_layout()
     plt.savefig(f"{RESULTS_DIR}/2_latency_scalability_p999.png")
     print(f"✓ Saved {RESULTS_DIR}/2_latency_scalability_p999.png")
     plt.close()
-
 # ==========================================
 # 3. Latency Distribution (長條圖)
 #    P50, P99, P99.9 breakdown for Max Threads
