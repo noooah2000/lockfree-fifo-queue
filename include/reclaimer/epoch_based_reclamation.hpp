@@ -28,14 +28,14 @@ public:
 
     struct ThreadContext 
     {
-        // 讓 active 和 local_epoch 處於不同的 Cache Line 避免 False Sharing
+        // 讓 in_critical 和 local_epoch 處於不同的 Cache Line 避免 False Sharing
         alignas(64) std::atomic<size_t> local_epoch{0};
-        alignas(64) std::atomic<bool> active{false};
+        alignas(64) std::atomic<bool> in_critical{false};
         
         std::vector<RetiredNode> retire_lists[3];
         EpochBasedReclaimationManager* manager = nullptr;
 
-        ThreadContext(EpochBasedReclaimationManager* central_reclaimer) : manager(central_reclaimer) 
+        ThreadContext(EpochBasedReclaimationManager& central_reclaimer) : manager(&central_reclaimer) 
         {
             manager->register_thread(this);
             // 預先分配空間，減少 vector 擴展的開銷
@@ -58,7 +58,7 @@ public:
 
     static ThreadContext& get_context() 
     {
-        thread_local ThreadContext ctx(&instance());
+        thread_local ThreadContext ctx(instance());
         return ctx;
     }
 
@@ -66,16 +66,17 @@ public:
     {
         auto& ctx = get_context();
         // 先更新 Epoch
-        ctx.local_epoch.store(global_epoch_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        // 再宣告自己 Active
-        ctx.active.store(true, std::memory_order_seq_cst);
+        size_t global_epoch = global_epoch_.load(std::memory_order_relaxed);
+        ctx.local_epoch.store(global_epoch, std::memory_order_relaxed);
+        // 再宣告自己 in_critical
+        ctx.in_critical.store(true, std::memory_order_seq_cst);
     }
 
     void exit_critical() noexcept 
     {
         auto& ctx = get_context();
         // 使用 release 即可，不需要 seq_cst
-        ctx.active.store(false, std::memory_order_release);
+        ctx.in_critical.store(false, std::memory_order_release);
     }
 
     template <typename T>
@@ -104,9 +105,9 @@ public:
     void quiescent_state() noexcept 
     {
         auto& ctx = get_context();
-        size_t g = global_epoch_.load(std::memory_order_relaxed);
         // 更新 epoch 讓別人知道我活著且推進了
-        ctx.local_epoch.store(g, std::memory_order_release);
+        size_t global_epoch = global_epoch_.load(std::memory_order_relaxed);
+        ctx.local_epoch.store(global_epoch, std::memory_order_release);
         scan_and_retire();
     }
 
@@ -122,9 +123,9 @@ public:
         // 遍歷所有執行緒檢查 Epoch
         for (ThreadContext* ctx : thread_registry_) 
         {
-            // 載入 active 狀態
-            bool t_active = ctx->active.load(std::memory_order_acquire);
-            if (t_active) 
+            // 載入 in_critical 狀態
+            bool t_in_critical = ctx->in_critical.load(std::memory_order_acquire);
+            if (t_in_critical) 
             {
                 // 如果活躍，檢查他的 epoch 是否落後
                 size_t t_epoch = ctx->local_epoch.load(std::memory_order_acquire);
