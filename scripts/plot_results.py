@@ -148,13 +148,14 @@ def plot_latency_scalability(data, target_payload):
     plt.title(f"Tail Latency P99.9 (Fixed Payload={target_payload}μs)")
     plt.xlabel("Producer Threads (P=C)")
     plt.ylabel("Latency (μs) - Log Scale")
-    plt.yscale('log') # 使用對數坐標
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.yscale('log') # 使用對數坐標，因為 Mutex 通常會飆很高
+    plt.legend()
     plt.grid(True, which="both", ls="-", alpha=0.5)
     plt.tight_layout()
     plt.savefig(f"{RESULTS_DIR}/2_latency_scalability_p999.png")
     print(f"✓ Saved {RESULTS_DIR}/2_latency_scalability_p999.png")
     plt.close()
+
 # ==========================================
 # 3. Latency Distribution (長條圖)
 #    P50, P99, P99.9 breakdown for Max Threads
