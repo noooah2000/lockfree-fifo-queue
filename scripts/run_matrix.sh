@@ -15,8 +15,8 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 impls=("hp" "ebr" "none" "mutex")
-threads=(1 2 4 6 8 10 12) # 模擬從低競爭到高競爭 (超過實體核數)
-fixed_payload=4           # 固定負載 (微秒)，模擬真實工作量
+threads=(1 2 4 6 8 10 12 16 20 24) # 模擬從低競爭到高競爭 (超過實體核數)
+fixed_payload=3           # 固定負載 (微秒)，模擬真實工作量
 payloads=(0 1 2 3 4 5 6)  # 測試不同負載對吞吐量的影響 (0=極限測試)
 duration=5                # 執行時間
 warmup=1                  # 暖身時間

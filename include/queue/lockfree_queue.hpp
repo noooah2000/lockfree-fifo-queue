@@ -176,7 +176,7 @@ class LockFreeQueue
 public:
     explicit LockFreeQueue(std::size_t /*cap_hint*/ = 0) 
     {
-        Node* dummy = new Node();      // init dummy
+        Node* dummy = new Node();      // init dummy 哨兵節點，真正的資料存在 Head->next 裡
         head_.store(dummy, std::memory_order_relaxed);
         tail_.store(dummy, std::memory_order_relaxed);
         closed_.store(false, std::memory_order_relaxed);
@@ -275,6 +275,18 @@ public:
                 return false;
             }
             
+            // 2. [新增] 保護 Next 節點
+            // 在讀取 value 之前，必須確保 next 節點不會被釋放
+            Reclaimer::protect_at(1, head_next);
+
+            // 3. [新增] 關鍵二次檢查
+            // 我們保護了 head_next，但在保護指令生效前，head_next 可能已經被刪除了。
+            // 只要確認 head 仍然是 curr_head，根據佇列特性，head 的 next 就必定還沒被完全 pop 出去。
+            if (curr_head != head_.load(std::memory_order_acquire))
+            {
+                continue; // 重試
+            }
+
             if (curr_head == curr_tail)
             {
                 Node* expected_tail = curr_tail;
@@ -283,10 +295,13 @@ public:
                                               std::memory_order_release, 
                                               std::memory_order_relaxed);
                 bk.pause();
-                Reclaimer::protect_at(0, nullptr); // 重試前清除保護(雖然不清除也行，但習慣好)
+                 // 重試前清除保護(雖然不清除也行，但習慣好)
+                Reclaimer::protect_at(0, nullptr);
+                Reclaimer::protect_at(1, nullptr); 
                 continue;
             }
-            
+
+            // 現在可以安全讀取了，因為 head_next 被我們保護著
             out = head_next->value;
             
             if (head_.compare_exchange_weak(curr_head, 
