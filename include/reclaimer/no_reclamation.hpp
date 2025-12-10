@@ -13,6 +13,8 @@
  *          最慢的情境。繞過 Pool 直接呼叫系統 free。
  *          每次 Enqueue/Dequeue 都觸發 OS 記憶體管理器的 Global Lock 競爭，
  *          導致嚴重的 Scalability 崩潰 (比 "不 delete" 還慢，因為多了 free 的開銷)。
+ * 
+ * 改動: Unsafe Reuse 移至 tests_correctness_main.cpp 進行
  */
 namespace mpmcq::reclaimer
 {

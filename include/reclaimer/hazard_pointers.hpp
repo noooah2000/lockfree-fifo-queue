@@ -128,7 +128,15 @@ public:
         while (curr) {
             if (curr->active.load(std::memory_order_acquire)) {
                 for (int i = 0; i < HP_COUNT_PER_THREAD; ++i) {
+                    // 如果缺少中間的 Fence (或 seq_cst 操作)，
+                    // Reader 可能先讀取 Head 確認有效，然後才公告 HP。
+                    // 而在這微小的時間差內，Reclaimer 可能已經讀取了 HP (發現沒人看) 並刪除了節點。
+                    // 加上 atomic_thread_fence (即seq_cst) 後，這種重排被物理禁止，確保了正確性。
+
+                    // Jay: 可能不用 seq_cst，待驗證
+                    //      可能 "非 x86" 平台需要
                     void* p = curr->hp[i].load(std::memory_order_acquire);
+                    // void* p = curr->hp[i].load(std::memory_order_seq_cst);
                     if (p) hazards.push_back(p);
                 }
             }
