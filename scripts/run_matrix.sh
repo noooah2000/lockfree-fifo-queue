@@ -15,12 +15,14 @@ rm -f "$OUT_DIR"/*.csv
 
 # 定義兩種模式
 MODES=("nopool" "pool")
+# MODES=("pool")
 
 # 參數設定
 impls=("hp" "ebr" "none" "mutex")
-threads=(1 2 3 5 7 9 11) # 模擬從低競爭到高競爭 (超過實體核數)
-fixed_payload=3           # 固定負載 (微秒)，模擬真實工作量
-payloads=(0 1 2 3 4 5 6)  # 測試不同負載對吞吐量的影響 (0=極限測試)
+fixed_thread=28
+threads=(1 8 16 24 32 36) # 模擬從低競爭到高競爭 (超過實體核數)
+fixed_payload=20           # 固定負載 (微秒)，模擬真實工作量
+payloads=(0 4 8 12 16 20)  # 測試不同負載對吞吐量的影響 (0=極限測試)
 duration=5                # 執行時間
 warmup=1                  # 暖身時間
 
@@ -60,7 +62,7 @@ for mode in "${MODES[@]}"; do
         for p in "${payloads[@]}"; do
             csv="$OUT_DIR/${impl}_${mode}_payload_${p}us.csv"
             "$BIN" --impl "$impl" \
-                   --producers 8 --consumers 8 \
+                   --producers "$fixed_thread" --consumers "$fixed_thread" \
                    --payload-us "$p" \
                    --duration "$duration" --warmup "$warmup" \
                    --csv "$csv"

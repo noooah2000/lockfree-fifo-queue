@@ -10,7 +10,7 @@ namespace mpmcq::reclaimer
 {
 
 // 每個執行緒最多同時保護 K 個指針 (M&S Queue 的 enqueue/dequeue 最多同時需要 2~3 個)
-constexpr int HP_COUNT_PER_THREAD = 3;
+constexpr int HP_COUNT_PER_THREAD = 2;
 // 觸發掃描的閾值 (越大吞吐量越高，但記憶體佔用越多)
 constexpr int HP_RETIRE_THRESHOLD = 128; 
 
@@ -65,6 +65,10 @@ public:
                 // 注意：這裡我們不清理 retire_list，嚴格來說這些垃圾會洩漏。
                 // 在正式實作中應該把這些節點轉移到全域孤兒列表 (Global Orphan List)。
                 // 但為了作業專案的複雜度控制，我們允許這裡的小量洩漏。
+                if (!retire_list.empty())
+                {
+                    HazardPointerManager::instance().scan_and_retire();
+                }
                 HazardPointerManager::instance().release_record(my_rec);
             }
         }

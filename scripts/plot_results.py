@@ -171,12 +171,12 @@ def plot_latency_scalability(data, target_payload):
 # ==========================================
 # 3. Latency Distribution (Modified Bar Chart)
 # ==========================================
-def plot_latency_distribution(data, target_payload):
+def plot_latency_distribution(data, target_payload, p_threads):
     # 篩選數據
     subset_payload = [d for d in data if d['payload_us'] == target_payload]
     if not subset_payload: return
     
-    target_p = 8
+    target_p = p_threads
     subset = [d for d in subset_payload if d['P'] == target_p]
     if not subset: return
 
@@ -326,15 +326,18 @@ def main():
     data = load_data()
     if not data: return
     
-    p_load = detect_scalability_payload(data)
-    p_threads = detect_sensitivity_threads(data)
+    # p_load = detect_scalability_payload(data)
+    p_load = 20
+    # p_threads = detect_sensitivity_threads(data)
+    p_threads = 28
+    # FIXED_THREAD = p_threads
     
     print(f"\nDetected Base Parameters:\n  - Payload for Scalability charts: {p_load} us\n  - Threads for Sensitivity charts: {p_threads} (P={p_threads}, C={p_threads})")
     
     if p_load is not None:
         plot_throughput_scalability(data, p_load)
         plot_latency_scalability(data, p_load)
-        plot_latency_distribution(data, p_load)
+        plot_latency_distribution(data, p_load, p_threads)
         plot_memory_scalability(data, p_load)
         plot_max_depth_scalability(data, p_load)
     
