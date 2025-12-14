@@ -316,8 +316,8 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
     };
 
     long long p50 = get_percentile(50.0);
-    long long p95 = get_percentile(95.0);
     long long p99 = get_percentile(99.0);
+    long long p999 = get_percentile(99.9);
     long long max_lat = all_latencies.empty() ? 0 : all_latencies.back();
     double avg_lat = 0;
     if (!all_latencies.empty())
@@ -338,8 +338,8 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
         std::cout << "Throughput (Cons): " << std::fixed << std::setprecision(0) << throughput_consumer << " ops/sec\n";
         std::cout << "Latency (ns): Avg=" << std::setprecision(1) << avg_lat
                   << ", P50=" << p50
-                  << ", p95=" << p95
                   << ", p99=" << p99
+                  << ", p99.p=" << p999
                   << ", Max=" << max_lat << "\n";
         std::cout << "Max Depth (Approx): " << max_depth.load() << "\n";
         std::cout << "Peak Memory: " << peak_mem_kb / 1024.0 << " MB\n";
@@ -354,7 +354,7 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
             fseek(f, 0, SEEK_END);
             if (ftell(f) == 0)
             {
-                std::fprintf(f, "impl,P,C,payload_us,throughput_prod,throughput_cons,avg_lat,p50,p95,p99,max_lat,max_depth,peak_mem_kb\n");
+                std::fprintf(f, "impl,P,C,payload_us,throughput_prod,throughput_cons,avg_lat,p50,p99,p999,max_lat,max_depth,peak_mem_kb\n");
             }
 
             std::fprintf(f, "%s,%d,%d,%d,%.2f,%.2f,%.2f,%lld,%lld,%lld,%lld,%lld,%ld\n",
@@ -364,7 +364,7 @@ static void run_benchmark(const BenchmarkArgs &args, const char *impl_name)
                          args.payload_us,
                          throughput_producer,
                          throughput_consumer,
-                         avg_lat, p50, p95, p99, max_lat,
+                         avg_lat, p50, p99, p999, max_lat,
                          max_depth.load(), peak_mem_kb);
             std::fclose(f);
             std::cout << "Wrote CSV: " << args.csv_path << "\n";

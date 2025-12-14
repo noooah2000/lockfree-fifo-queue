@@ -10,23 +10,37 @@ from collections import defaultdict
 plt.style.use('ggplot') 
 RESULTS_DIR = "results"
 
-# 顏色定義
-COLOR_MAP = {
-    'HazardPointer': ('lightcoral', 'firebrick'),      # HP
-    'EBR':           ('lightskyblue', 'navy'),         # EBR
-    'MutexQueue':    ('silver', 'dimgray'),            # Mutex
-    'NoReclamation': ('lightgreen', 'darkgreen'),      # None
+# ==========================================
+# 1. 顏色定義
+# ==========================================
+COLOR_MAP_IMPL = {
+    # C++ Output Names
+    'HazardPointer': ('lightcoral', 'firebrick'),
+    'EBR':           ('lightskyblue', 'navy'),
+    'MutexQueue':    ('silver', 'dimgray'),
+    'NoReclamation': ('lightgreen', 'darkgreen'),
     
-    # 相容小寫
+    # Short Names (Fallback)
     'hp':            ('lightcoral', 'firebrick'),
     'ebr':           ('lightskyblue', 'navy'),
     'mutex':         ('silver', 'dimgray'),
     'none':          ('lightgreen', 'darkgreen')
 }
 
+# Spot Check 模式顏色
+COLOR_MAP_MODE = {
+    'NoPool / NoBO':   '#E24A33', # 紅
+    'Pool / NoBO':     '#348ABD', # 藍
+    'NoPool / Backoff':'#FBC15E', # 黃
+    'Pool / Backoff':  '#8EBA42'  # 綠
+}
+
+def get_mode_name(is_pool, is_backoff):
+    pool_str = "Pool" if is_pool else "NoPool"
+    bo_str = "Backoff" if is_backoff else "NoBO"
+    return f"{pool_str} / {bo_str}"
+
 def load_data():
-    """讀取所有 CSV 檔案並解析數據"""
-    data = []
     if not os.path.exists(RESULTS_DIR):
         print(f"Error: Directory '{RESULTS_DIR}' not found.")
         return []
@@ -37,305 +51,306 @@ def load_data():
         return []
 
     print(f"Loading {len(files)} CSV files...")
+    raw_groups = defaultdict(list)
     
     for filename in files:
-        is_pool = "_pool_" in filename
-        mode_suffix = " (Pool)" if is_pool else " (Malloc)"
+        fname = os.path.basename(filename)
+        is_pool = "pool" in fname and "nopool" not in fname
+        is_backoff = "backoff" in fname and "nobackoff" not in fname
         
         with open(filename, newline='') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    raw_impl = row['impl'].strip()
-                    display_impl = raw_impl + mode_suffix
+                    impl = row['impl'].strip()
+                    p_val = int(row['P'])
+                    c_val = int(row['C'])
+                    payload = int(row['payload_us'])
                     
-                    data.append({
-                        'raw_impl': raw_impl,
-                        'display_impl': display_impl,
-                        'is_pool': is_pool,
-                        'P': int(row['P']),
-                        'C': int(row['C']),
-                        'payload_us': int(row['payload_us']),
-                        'throughput': float(row['throughput_cons']), 
-                        
-                        # Latency: ns -> us
+                    key = (impl, is_pool, is_backoff, p_val, c_val, payload)
+                    
+                    entry = {
+                        'throughput_prod': float(row['throughput_prod']),
+                        'throughput_cons': float(row['throughput_cons']),
                         'avg_lat': float(row['avg_lat']) / 1000.0,
                         'p50': float(row['p50']) / 1000.0,
-                        'p95': float(row['p95']) / 1000.0,
                         'p99': float(row['p99']) / 1000.0,
+                        'p999': float(row['p999']) / 1000.0,
                         'max_lat': float(row['max_lat']) / 1000.0,
-                        
-                        # Memory: KB -> MB
                         'peak_mem_mb': float(row['peak_mem_kb']) / 1024.0,
-                        
-                        # Max Depth
                         'max_depth': int(row['max_depth'])
-                    })
+                    }
+                    raw_groups[key].append(entry)
                 except (KeyError, ValueError) as e:
-                    print(f"Skipping row in {filename}: {e}")
+                    # 相容舊版 CSV (如果沒有 p999)
+                    if 'p999' not in entry and 'max_lat' in entry:
+                         entry['p999'] = entry['max_lat']
                     continue
-    return data
 
-def get_style(raw_impl, is_pool):
-    """回傳 (color, linestyle, marker)"""
-    colors = COLOR_MAP.get(raw_impl, ('magenta', 'darkmagenta'))
-    color = colors[1] if is_pool else colors[0]
-    # 因為分開畫了，線條樣式可以統一，或者保持區別
-    linestyle = '-' if is_pool else '--'  
-    marker = 'o' if is_pool else 'v'      
-    return color, linestyle, marker
-
-# ==========================================
-# Helper: 通用折線圖繪製 (左右子圖)
-# ==========================================
-def plot_side_by_side(data, x_key, y_key, title_main, y_label, filename, log_scale=False, y_limit=None):
-    """
-    通用函式：將數據分為 Malloc(左) 與 Pool(右) 兩張子圖
-    """
-    raw_impls = sorted(list(set(d['raw_impl'] for d in data)))
+    aggregated_data = []
+    print(f"Aggregating data from {len(raw_groups)} configurations (Median of runs)...")
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6)) # sharey=False 以便觀察各自的趨勢
-    
-    # 定義子圖繪製邏輯
-    def plot_subplot(ax, is_pool_target, subplot_title):
-        has_data = False
-        for impl in raw_impls:
-            # 篩選特定實作與模式的數據
-            rows = sorted([d for d in data if d['raw_impl'] == impl and d['is_pool'] == is_pool_target], key=lambda r: r[x_key])
-            if not rows: continue
-            
-            has_data = True
-            color, ls, marker = get_style(impl, is_pool_target)
-            x = [r[x_key] for r in rows]
-            y = [r[y_key] for r in rows]
-            
-            # 使用 display_impl 作為 label，或者只用 raw_impl (因為標題已區分模式)
-            label = rows[0]['display_impl']
-            
-            ax.plot(x, y, label=label, color=color, linestyle=ls, marker=marker, linewidth=2, alpha=0.8)
+    for key, entries in raw_groups.items():
+        impl, is_pool, is_backoff, p_val, c_val, payload = key
         
-        ax.set_title(subplot_title)
-        ax.set_xlabel("Threads (P=C)" if x_key == 'P' else "Payload Size (μs)")
-        ax.set_ylabel(y_label)
-        if log_scale: ax.set_yscale('log')
-        if y_limit: ax.set_ylim(y_limit)
-        if has_data: ax.legend()
-        ax.grid(True, which="both", ls="-", alpha=0.3)
+        final_entry = {
+            'raw_impl': impl,
+            'is_pool': is_pool,
+            'is_backoff': is_backoff,
+            'mode_name': get_mode_name(is_pool, is_backoff),
+            'display_impl': impl, 
+            'P': p_val,
+            'C': c_val,
+            'payload_us': payload,
+            'runs_count': len(entries)
+        }
+        
+        metrics = ['throughput_prod', 'throughput_cons', 
+                   'avg_lat', 'p50', 'p99', 'p999', 'max_lat', 
+                   'peak_mem_mb', 'max_depth']
+        for metric in metrics:
+            vals = [e[metric] for e in entries]
+            final_entry[metric] = np.median(vals)
+            
+        aggregated_data.append(final_entry)
+        
+    return aggregated_data
 
-    # 繪製左圖 (No Pool)
-    plot_subplot(ax1, False, "No Pool (Malloc)")
+# ==========================================
+# Helper: 單一折線圖
+# ==========================================
+def plot_simple_line(data, x_key, y_key, title_main, y_label, filename, log_scale=False, y_limit=None):
+    target_mode = "Pool / Backoff"
+    subset = [d for d in data if d['mode_name'] == target_mode]
     
-    # 繪製右圖 (Pool)
-    plot_subplot(ax2, True, "Object Pool")
+    if not subset:
+        subset = data
+        title_suffix = " (All Modes)"
+    else:
+        title_suffix = f" ({target_mode})"
+
+    raw_impls = sorted(list(set(d['raw_impl'] for d in subset)))
     
-    # 設定總標題
-    fig.suptitle(title_main, fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # 預留空間給 suptitle
+    plt.figure(figsize=(10, 6))
     
+    for impl in raw_impls:
+        rows = sorted([d for d in subset if d['raw_impl'] == impl], key=lambda r: r[x_key])
+        if not rows: continue
+        
+        color = COLOR_MAP_IMPL.get(impl, ('gray', 'black'))[1]
+        
+        x = [r[x_key] for r in rows]
+        y = [r[y_key] for r in rows]
+        
+        plt.plot(x, y, label=impl, color=color, marker='o', linewidth=2.5, alpha=0.9)
+        
+    plt.title(title_main + title_suffix)
+    plt.xlabel("Threads (P=C)" if x_key == 'P' else "Payload Size (μs)")
+    plt.ylabel(y_label)
+    if log_scale: plt.yscale('log')
+    if y_limit: plt.ylim(y_limit)
+    plt.legend()
+    plt.grid(True, which="both", ls="-", alpha=0.3)
+    
+    plt.tight_layout()
     plt.savefig(f"{RESULTS_DIR}/{filename}")
     print(f"✓ Saved {RESULTS_DIR}/{filename}")
     plt.close()
 
 # ==========================================
-# 1. Throughput Scalability
+# Chart Wrappers
 # ==========================================
+
+# 1a. Consumer Throughput
 def plot_throughput_scalability(data, target_payload):
     subset = [d for d in data if d['payload_us'] == target_payload]
-    if not subset: return
-    
-    # 預處理數據：Throughput 單位換算
-    for d in subset: d['_tp_million'] = d['throughput'] / 1_000_000
+    for d in subset: d['_tp_million'] = d['throughput_cons'] / 1_000_000
+    plot_simple_line(subset, 'P', '_tp_million', f"Consumer Throughput (Payload={target_payload}μs)", 
+                     "Throughput (M ops/sec)", "1_throughput_scalability.png")
 
-    plot_side_by_side(
-        subset, x_key='P', y_key='_tp_million',
-        title_main=f"Throughput Scalability (Fixed Payload={target_payload}μs)",
-        y_label="Consumer Throughput (Million ops/sec)",
-        filename="1_throughput_scalability.png"
-    )
+# 1b. Producer Throughput (新增!)
+def plot_producer_throughput_scalability(data, target_payload):
+    subset = [d for d in data if d['payload_us'] == target_payload]
+    for d in subset: d['_tp_million'] = d['throughput_prod'] / 1_000_000
+    plot_simple_line(subset, 'P', '_tp_million', f"Producer Throughput (Payload={target_payload}μs)", 
+                     "Throughput (M ops/sec)", "1b_producer_throughput_scalability.png")
 
-# ==========================================
-# 2. Latency Scalability (P99)
-# ==========================================
+# 2. P99.9 Latency
 def plot_latency_scalability(data, target_payload):
     subset = [d for d in data if d['payload_us'] == target_payload]
-    if not subset: return
+    plot_simple_line(subset, 'P', 'p999', f"P99.9 Latency (Payload={target_payload}μs)", 
+                     "Latency (μs)", "2_latency_scalability_p999.png", log_scale=True)
 
-    plot_side_by_side(
-        subset, x_key='P', y_key='p99',
-        title_main=f"Tail Latency P99 (Fixed Payload={target_payload}μs)",
-        y_label="Latency (μs) - Log Scale",
-        filename="2_latency_scalability_p99.png",
-        log_scale=True
-    )
+# 4. Memory
+def plot_memory_scalability(data, target_payload):
+    subset = [d for d in data if d['payload_us'] == target_payload]
+    plot_simple_line(subset, 'P', 'peak_mem_mb', f"Peak Memory (Payload={target_payload}μs)", 
+                     "Memory (MB)", "4_memory_scalability.png")
 
-# ==========================================
-# 3. Latency Distribution (Modified Bar Chart)
-# ==========================================
-def plot_latency_distribution(data, target_payload, p_threads):
-    # 篩選數據
-    subset_payload = [d for d in data if d['payload_us'] == target_payload]
-    if not subset_payload: return
-    
-    target_p = p_threads
-    subset = [d for d in subset_payload if d['P'] == target_p]
-    if not subset: return
+# 5. Depth
+def plot_max_depth_scalability(data, target_payload):
+    subset = [d for d in data if d['payload_us'] == target_payload]
+    plot_simple_line(subset, 'P', 'max_depth', f"Max Depth (Payload={target_payload}μs)", 
+                     "Depth", "5_max_depth_scalability.png")
 
-    # 去重邏輯 (針對 run_matrix.sh 重複執行的部分)
-    unique_map = {}
+# 6. Payload Sensitivity
+def plot_payload_sensitivity(data, target_p):
+    subset = [d for d in data if d['P'] == target_p]
+    for d in subset: d['_tp_million'] = d['throughput_cons'] / 1_000_000
+    # [修正標題] P=C=8
+    plot_simple_line(subset, 'payload_us', '_tp_million', f"Payload Sensitivity (P=C={target_p})", 
+                     "Throughput (M ops/sec)", "6_payload_sensitivity.png")
+
+# 7. Efficiency
+def plot_efficiency_sensitivity(data, target_p):
+    subset = [d for d in data if d['P'] == target_p and d['payload_us'] > 0]
     for d in subset:
-        unique_map[(d['raw_impl'], d['is_pool'])] = d
-    subset = list(unique_map.values())
+        ideal = d['C'] * (1_000_000.0 / d['payload_us'])
+        d['_eff'] = (d['throughput_cons'] / ideal) * 100.0
+    # [修正標題] P=C=8
+    plot_simple_line(subset, 'payload_us', '_eff', f"Efficiency (P=C={target_p})", 
+                     "Efficiency (%)", "7_efficiency_sensitivity.png", y_limit=(0, 110))
 
-    # 準備畫布 (1行2列)
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7), sharey=True) # Bar chart 建議 sharey 方便比較
+# ==========================================
+# 3. Latency Distribution (修正: P50, P99, P99.9, Max)
+# ==========================================
+def plot_latency_distribution(data, target_payload):
+    target_mode = "Pool / Backoff"
+    target_p = 8 # 固定為 8
     
-    metrics = ['avg_lat', 'p50', 'p95', 'p99', 'max_lat']
-    metric_labels = ['Avg', 'P50', 'P95', 'P99', 'Max']
-    colors = ['forestgreen', 'skyblue', 'orange', 'firebrick', 'purple']
-    width = 0.15
+    subset = [d for d in data if d['payload_us'] == target_payload and d['P'] == target_p and d['mode_name'] == target_mode]
+    if not subset:
+        subset = [d for d in data if d['payload_us'] == target_payload and d['P'] == target_p]
+        if not subset: return
 
-    def plot_bar_subplot(ax, is_pool_target, title):
-        # 篩選並排序
-        rows = [d for d in subset if d['is_pool'] == is_pool_target]
-        rows.sort(key=lambda x: x['raw_impl']) # 依實作名稱排序
-        
-        if not rows: return
-
-        labels = [d['raw_impl'] for d in rows] # 簡化標籤，不顯示 (Pool)/(Malloc)
-        x = np.arange(len(labels))
-        
-        # 繪製 5 根柱子
-        for i, (metric, color, label) in enumerate(zip(metrics, colors, metric_labels)):
-            values = [d[metric] for d in rows]
-            # 位移：中間是 0，左右分散 (e.g., -2w, -1w, 0, 1w, 2w)
-            offset = (i - 2) * width 
-            ax.bar(x + offset, values, width, label=label, color=color, edgecolor='black')
-
-        ax.set_title(title)
-        ax.set_xlabel('Implementation')
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=15)
-        ax.set_yscale('log')
-        ax.grid(True, axis='y', which='both', alpha=0.3)
-        ax.legend()
-
-    # 左圖
-    plot_bar_subplot(ax1, False, f"Latency Dist - No Pool (Malloc) (P={target_p})")
-    ax1.set_ylabel('Latency (μs) - Log Scale')
+    subset.sort(key=lambda x: x['raw_impl'])
     
-    # 右圖
-    plot_bar_subplot(ax2, True, f"Latency Dist - Object Pool (P={target_p})")
+    labels = [d['raw_impl'] for d in subset]
+    # [修改] 加入 Max Latency
+    metrics = ['p50', 'p99', 'p999', 'max_lat']
+    metric_labels = ['P50', 'P99', 'P99.9', 'Max']
+    colors = ['skyblue', 'orange', 'firebrick', 'purple']
     
-    fig.suptitle(f"Latency Distribution (Threads={target_p}, Payload={target_payload}μs)", fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    x = np.arange(len(labels))
+    width = 0.2
+
+    plt.figure(figsize=(12, 6))
+    
+    for i, (metric, color, label) in enumerate(zip(metrics, colors, metric_labels)):
+        values = [d[metric] for d in subset]
+        offset = (i - 1.5) * width
+        plt.bar(x + offset, values, width, label=label, color=color, edgecolor='black')
+    
+    plt.xlabel('Implementation')
+    plt.ylabel('Latency (μs) - Log Scale')
+    # [修正標題] P=C=8
+    plt.title(f'Latency Distribution (Threads={target_p} (P=C={target_p}), Payload={target_payload}μs)\n({target_mode})')
+    plt.xticks(x, labels, rotation=0)
+    plt.yscale('log')
+    plt.legend()
+    plt.grid(True, axis='y', which='both', alpha=0.3)
+    
+    plt.tight_layout()
     plt.savefig(f"{RESULTS_DIR}/3_latency_distribution.png")
     print(f"✓ Saved {RESULTS_DIR}/3_latency_distribution.png")
     plt.close()
 
 # ==========================================
-# 4. Memory Peak Scalability
+# 8. Spot Check (3x2 Grid, Legend Bottom)
 # ==========================================
-def plot_memory_scalability(data, target_payload):
-    subset = [d for d in data if d['payload_us'] == target_payload]
-    if not subset: return
+def plot_spot_check_4_modes(data, target_p, target_payload):
+    subset = [d for d in data if d['P'] == target_p and d['payload_us'] == target_payload]
+    if not subset: 
+        print(f"Warning: No data found for P={target_p}, Payload={target_payload}")
+        return
 
-    plot_side_by_side(
-        subset, x_key='P', y_key='peak_mem_mb',
-        title_main=f"Peak Memory Usage (Fixed Payload={target_payload}μs)",
-        y_label="Memory Peak (MB)",
-        filename="4_memory_scalability.png"
-    )
-
-# ==========================================
-# 5. Max Depth Scalability
-# ==========================================
-def plot_max_depth_scalability(data, target_payload):
-    subset = [d for d in data if d['payload_us'] == target_payload]
-    if not subset: return
-
-    plot_side_by_side(
-        subset, x_key='P', y_key='max_depth',
-        title_main=f"Max Queue Depth (Fixed Payload={target_payload}μs)",
-        y_label="Max Depth (Count)",
-        filename="5_max_depth_scalability.png"
-    )
-
-# ==========================================
-# 6. Payload Sensitivity
-# ==========================================
-def plot_payload_sensitivity(data, target_p):
-    subset = [d for d in data if d['P'] == target_p]
-    if not subset: return
+    modes_order = ['NoPool / NoBO', 'Pool / NoBO', 'NoPool / Backoff', 'Pool / Backoff']
+    impls = sorted(list(set(d['raw_impl'] for d in subset)))
     
-    # 去重
-    unique_map = {}
-    for d in subset: unique_map[(d['raw_impl'], d['is_pool'], d['payload_us'])] = d
-    subset = list(unique_map.values())
+    fig, axes = plt.subplots(3, 2, figsize=(16, 19))
+    # [修正標題] P=C=8
+    fig.suptitle(f"Spot Check Comparison (P=C={target_p}, Payload={target_payload}μs)\n(Median of 5 runs)", fontsize=16)
+    
+    charts_config = [
+        (axes[0, 0], 'throughput_prod', 'Producer Throughput', 'M Ops/Sec', 'linear'),
+        (axes[0, 1], 'throughput_cons', 'Consumer Throughput', 'M Ops/Sec', 'linear'),
+        (axes[1, 0], 'peak_mem_mb', 'Peak Memory', 'MB', 'linear'),
+        (axes[1, 1], 'max_depth', 'Max Queue Depth', 'Count', 'linear'),
+        (axes[2, 0], 'p99', 'P99 Latency', 'μs', 'log'),
+        (axes[2, 1], 'p999', 'P99.9 Latency', 'μs', 'log')
+    ]
 
-    # 預處理
-    for d in subset: d['_tp_million'] = d['throughput'] / 1_000_000
+    x = np.arange(len(impls))
+    bar_width = 0.2
+    legend_handles = []
+    legend_labels = []
 
-    plot_side_by_side(
-        subset, x_key='payload_us', y_key='_tp_million',
-        title_main=f"Payload Sensitivity (Threads={target_p}P/{target_p}C)",
-        y_label="Consumer Throughput (Million ops/sec)",
-        filename="6_payload_sensitivity.png"
-    )
+    for ax, metric, title, ylabel, scale in charts_config:
+        for i, mode in enumerate(modes_order):
+            values = []
+            for impl in impls:
+                found = next((d for d in subset if d['raw_impl'] == impl and d['mode_name'] == mode), None)
+                val = found[metric] if found else 0
+                if 'throughput' in metric: val /= 1_000_000
+                values.append(val)
+            
+            offset = (i - 1.5) * bar_width
+            bars = ax.bar(x + offset, values, bar_width, label=mode, 
+                          color=COLOR_MAP_MODE.get(mode, 'gray'), edgecolor='black')
+            
+            if ax == axes[0, 0] and i < len(modes_order):
+                legend_handles.append(bars)
+                legend_labels.append(mode)
 
-# ==========================================
-# 7. Efficiency Sensitivity
-# ==========================================
-def plot_efficiency_sensitivity(data, target_p):
-    subset = [d for d in data if d['P'] == target_p and d['payload_us'] > 0]
-    if not subset: return
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(x)
+        ax.set_xticklabels(impls)
+        if scale == 'log': ax.set_yscale('log')
+        ax.grid(True, axis='y', alpha=0.3)
 
-    # 去重
-    unique_map = {}
-    for d in subset: unique_map[(d['raw_impl'], d['is_pool'], d['payload_us'])] = d
-    subset = list(unique_map.values())
+    plt.subplots_adjust(bottom=0.10, hspace=0.3, top=0.93)
+    
+    fig.legend(legend_handles, legend_labels, 
+               loc='lower center',            
+               bbox_to_anchor=(0.5, 0.02),    
+               ncol=2,                        
+               fontsize='large', 
+               title="Configuration", title_fontsize='large',
+               frameon=True, fancybox=True, shadow=True)
 
-    # 計算效率
-    for d in subset:
-        ideal_ops = d['C'] * (1_000_000.0 / d['payload_us'])
-        d['_efficiency'] = (d['throughput'] / ideal_ops) * 100.0
-
-    plot_side_by_side(
-        subset, x_key='payload_us', y_key='_efficiency',
-        title_main=f"System Efficiency (Threads={target_p}P/{target_p}C)",
-        y_label="Efficiency (%)",
-        filename="7_efficiency_sensitivity.png",
-        y_limit=(0, 110)
-    )
+    output_file = f"8_spot_check_P{target_p}_Payload{target_payload}.png"
+    plt.savefig(os.path.join(RESULTS_DIR, output_file))
+    print(f"✓ Saved {os.path.join(RESULTS_DIR, output_file)}")
+    plt.close()
 
 # ==========================================
 # Main
 # ==========================================
-def detect_scalability_payload(data):
+def detect_base_params(data):
+    main_data = [d for d in data if d['is_pool'] and d['is_backoff']]
+    if not main_data: main_data = data
+    
     counts = defaultdict(set)
-    for d in data: counts[d['payload_us']].add(d['P'])
-    if not counts: return None
-    return max(counts.items(), key=lambda x: len(x[1]))[0]
+    for d in main_data: counts[d['payload_us']].add(d['P'])
+    p_load = max(counts.items(), key=lambda x: len(x[1]))[0] if counts else None
 
-def detect_sensitivity_threads(data):
     counts = defaultdict(set)
-    for d in data: counts[d['P']].add(d['payload_us'])
-    if not counts: return None
-    return max(counts.items(), key=lambda x: len(x[1]))[0]
+    for d in main_data: counts[d['P']].add(d['payload_us'])
+    p_threads = max(counts.items(), key=lambda x: len(x[1]))[0] if counts else None
+    
+    return p_load, p_threads
 
 def main():
     data = load_data()
     if not data: return
     
-    # p_load = detect_scalability_payload(data)
-    p_load = 20
-    # p_threads = detect_sensitivity_threads(data)
-    p_threads = 28
-    # FIXED_THREAD = p_threads
-    
-    print(f"\nDetected Base Parameters:\n  - Payload for Scalability charts: {p_load} us\n  - Threads for Sensitivity charts: {p_threads} (P={p_threads}, C={p_threads})")
+    p_load, p_threads = detect_base_params(data)
+    print(f"\nDetected Base Parameters:\n  - Payload: {p_load} us\n  - Threads: {p_threads}")
     
     if p_load is not None:
         plot_throughput_scalability(data, p_load)
+        plot_producer_throughput_scalability(data, p_load) # 新增
         plot_latency_scalability(data, p_load)
         plot_latency_distribution(data, p_load, p_threads)
         plot_memory_scalability(data, p_load)
@@ -344,7 +359,13 @@ def main():
     if p_threads is not None:
         plot_payload_sensitivity(data, p_threads)
         plot_efficiency_sensitivity(data, p_threads)
-    
+        
+    # 設定 Spot Check 參數 (P=8, Payload=3)
+    spot_check_p = 8
+    spot_check_payload = 3
+    print(f"\nGenerating Spot Check for P={spot_check_p}, Payload={spot_check_payload}...")
+    plot_spot_check_4_modes(data, spot_check_p, spot_check_payload)
+
     print("\n✅ All plots generated successfully!")
 
 if __name__ == "__main__":

@@ -65,9 +65,9 @@ public:
                 // 注意：這裡我們不清理 retire_list，嚴格來說這些垃圾會洩漏。
                 // 在正式實作中應該把這些節點轉移到全域孤兒列表 (Global Orphan List)。
                 // 但為了作業專案的複雜度控制，我們允許這裡的小量洩漏。
-                if (!retire_list.empty())
+                if (!retire_list.empty()) 
                 {
-                    HazardPointerManager::instance().scan_and_retire();
+                    HazardPointerManager::instance().scan_and_retire(); 
                 }
                 HazardPointerManager::instance().release_record(my_rec);
             }
