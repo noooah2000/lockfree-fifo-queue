@@ -52,28 +52,46 @@ namespace mpmcq
 
 struct SimpleBackoff 
 {
-    // 把單純 ++n 改成指數 backoff，避免每個 threads 重試的頻率一樣而造成 bus 壅擠
     int n = 1;
-    static constexpr int MAX_YIELD = 64; 
+    static constexpr int MAX_YIELD = 512; 
+
     inline void pause() noexcept 
     {
-#ifdef LFQ_USE_BACKOFF // 只有定義了 Backoff 才執行
+#ifdef LFQ_USE_BACKOFF
         if (n <= MAX_YIELD) 
         {
-            for (int i = 0; i < n; ++i) {
+            // [修正] 使用 Xorshift 演算法產生真正的 Thread-Local 隨機數
+            // 這比 rand() 快非常多，只需要 3 個位元指令
+            static thread_local uint32_t seed = 0x9E3779B9; // 黃金分割數當初始種子
+            
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+
+            // n 通常是 2 的次方 (1, 2, 4, 8...)
+            // 我們產生一個 0 到 n-1 之間的亂數
+            // 總等待次數範圍：[n, 2n - 1]
+            // 例如 n=64, 等待次數就是 64 ~ 127 之間的任意值
+            int jitter_cycles = n + (seed & (n - 1)); 
+
+            for (int i = 0; i < jitter_cycles; ++i) {
                 cpu_relax();
             }
-            n *= 2;
+            n <<= 1; 
         } 
         else 
         {
-            // 如果真的搶太兇，就讓出 Time Slice
             std::this_thread::yield();
-            n = 1;
+            n = 1; 
         }
-#endif // LFQ_USE_BACKOFF
+#endif
     }
 };
+
+
+// 設定 Pool 的參數
+constexpr size_t POOL_BATCH_SIZE = 128;   // 一次與全域交換的數量
+constexpr size_t POOL_LOCAL_CAP  = 512;  // 本地緩衝區容量 (須 > BATCH_SIZE)
 
 // 必須將 NodePool 定義在 LockFreeQueue 之前，否則編譯器找不到
 template <typename Node>
@@ -86,31 +104,46 @@ class NodePool
     // 預設為 nullptr，只有當 LocalBuffer 建構時才會指向自己，解構時歸零
     inline static thread_local LocalBuffer* local_pool_ptr = nullptr;
 
+    // [新增 2] 全域計數器 (Atomic)，用於 Dirty Check 避免無謂搶鎖
+    inline static std::atomic<size_t> global_count{0};
+
     // 1. 定義一個內部類別來管理本地緩衝區
     struct LocalBuffer 
     {
-        std::vector<Node*> vec;
+        // [優化] 改用固定大小陣列，避免 vector 的動態配置開銷
+        Node* nodes[POOL_LOCAL_CAP];
+        size_t top = 0; // 指向堆疊頂端
         
-        // [新增 2] 建構時註冊自己
+        // 建構時註冊自己
         LocalBuffer() {
             local_pool_ptr = this;
         }
 
-        // [新增 3] 解構時註銷自己
+        // 解構時註銷自己
         ~LocalBuffer() 
         {
             local_pool_ptr = nullptr; // 標記為已死亡
             
-            if (!vec.empty())
+            if (top > 0)
             {
                 // 把私房錢歸還給全域池 (讓其他執行緒重用)
                 std::lock_guard<std::mutex> lock(NodePool::global_pool_mutex);
-                for (Node* node : vec) 
+                for (size_t i = 0; i < top; ++i) 
                 {
-                    NodePool::global_pool.push_back(node);
+                    NodePool::global_pool.push_back(nodes[i]);
                 }
+                // 更新全域計數
+                NodePool::global_count.fetch_add(top, std::memory_order_relaxed);
             }
         }
+
+        // 輔助函式 (Stack操作)
+        bool empty() const { return top == 0; }
+        // 當堆疊快滿時 (保留一點緩衝空間) 需要歸還
+        bool should_flush() const { return top >= (POOL_LOCAL_CAP - 16); }
+        void push(Node* ptr) { nodes[top++] = ptr; }
+        Node* pop() { return nodes[--top]; }
+        size_t size() const { return top; }
     };
 
 public:
@@ -123,40 +156,48 @@ public:
     static Node* allocate() 
     {
         // 這裡直接使用 local_pool 物件，確保它被初始化
-        // (Accessing local_pool forces construction, which sets local_pool_ptr)
-        if (!local_pool.vec.empty()) 
+        
+        // 1. [極速路徑] 本地有貨，直接拿 (只做指標運算，無 Atomic/Lock)
+        if (!local_pool.empty()) 
         {
-            Node* new_node = local_pool.vec.back();
-            local_pool.vec.pop_back();
+            Node* new_node = local_pool.pop();
             ASAN_UNPOISON_NODE(new_node, sizeof(Node));    // 告訴 ASan 這塊記憶體現在可以合法使用了: 解毒 (Unpoison)
             return new_node;
         }
 
-        // 2. 本地沒了，去全域搬貨 (一次搬 32 個)
+        // 2. [優化路徑] Dirty Check (Double-Checked Locking 變體)
+        // 如果全域計數器顯示沒貨，直接跳過鎖，去跟 OS 要
+        // 這能避免在系統剛啟動或高負載(池被搶光)時的鎖競爭
+        if (global_count.load(std::memory_order_relaxed) >= POOL_BATCH_SIZE)
         {
+            // 3. [慢速路徑] 本地沒了且全域有貨，去全域搬貨
             std::lock_guard<std::mutex> lock(global_pool_mutex);
             if (!global_pool.empty()) 
             {
-                int count = 0;
-                while(!global_pool.empty() && count < 32) 
+                size_t count = 0;
+                // 一次搬運 BATCH_SIZE，減少下次搶鎖頻率
+                while(!global_pool.empty() && count < POOL_BATCH_SIZE) 
                 {
-                    local_pool.vec.push_back(global_pool.back());
+                    local_pool.push(global_pool.back());
                     global_pool.pop_back();
                     count++;
+                }
+                // 批量更新計數器
+                if (count > 0) {
+                    global_count.fetch_sub(count, std::memory_order_relaxed);
                 }
             }
         }
 
-        // 3. 搬完後再查一次本地
-        if (!local_pool.vec.empty()) 
+        // 4. 搬完後再查一次本地
+        if (!local_pool.empty()) 
         {
-            Node* new_node = local_pool.vec.back();
-            local_pool.vec.pop_back();
+            Node* new_node = local_pool.pop();
             ASAN_UNPOISON_NODE(new_node, sizeof(Node));    // 告訴 ASan 這塊記憶體現在可以合法使用了: 解毒 (Unpoison)
             return new_node;
         }
         
-        // 4. 真的沒貨，跟 OS 要記憶體 (使用 ::operator new 防止遞迴)
+        // 5. 真的沒貨，跟 OS 要記憶體 (使用 ::operator new 防止遞迴)
         return static_cast<Node*>(::operator new(sizeof(Node)));
     }
 
@@ -167,18 +208,25 @@ public:
         {
             // Pool 活著：正常回收
             
-            // 如果本地積太多 (>64)，還一半給全域
-            if (local_pool_ptr->vec.size() > 64) 
+            // 如果本地積太多，還一部分給全域
+            if (local_pool_ptr->should_flush()) 
             {
                 std::lock_guard<std::mutex> lock(global_pool_mutex);
-                for (int i=0; i<32; ++i) 
+                size_t moved_count = 0;
+                for (size_t i=0; i < POOL_BATCH_SIZE; ++i) 
                 {
-                    global_pool.push_back(local_pool_ptr->vec.back());
-                    local_pool_ptr->vec.pop_back();
+                    if (local_pool_ptr->empty()) break;
+                    Node* node_to_return = local_pool_ptr->pop();
+                    global_pool.push_back(node_to_return);
+                    moved_count++;
+                }
+                // 批量更新計數器
+                if (moved_count > 0) {
+                    global_count.fetch_add(moved_count, std::memory_order_relaxed);
                 }
             }
             // 放回本地
-            local_pool_ptr->vec.push_back(recycled_node);
+            local_pool_ptr->push(recycled_node);
             ASAN_POISON_NODE(recycled_node, sizeof(Node));     // 告訴 ASan 這塊記憶體現在是「有毒」的，誰讀寫就報錯
         }
         else 

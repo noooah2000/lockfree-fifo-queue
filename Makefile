@@ -15,9 +15,23 @@ RESULT    := results
 BENCH_SRC := src/benchmark_main.cpp
 TESTS_SRC := src/tests_correctness_main.cpp
 
-# Flags (注意：這裡移除了預設的 DEF_BACKOFF，改在 Target 中指定)
-CXXFLAGS_REL  := $(CXXFLAGS_COMMON) -O3 -DNDEBUG -latomic
-CXXFLAGS_ASAN := $(CXXFLAGS_COMMON) $(DEF_BACKOFF) -O1 -g -fsanitize=address -fno-omit-frame-pointer -latomic
+# ==========================================
+# OS Detection & Library Settings
+# ==========================================
+UNAME_S := $(shell uname -s)
+
+# 預設不加 -latomic (適用 macOS)
+ATOMIC_LIB :=
+
+# 如果是 Linux，則加入 -latomic
+ifeq ($(UNAME_S),Linux)
+    ATOMIC_LIB := -latomic
+endif
+
+# Flags
+# 注意：這裡將原本寫死的 -latomic 改成了變數 $(ATOMIC_LIB)
+CXXFLAGS_REL  := $(CXXFLAGS_COMMON) -O3 -DNDEBUG $(ATOMIC_LIB)
+CXXFLAGS_ASAN := $(CXXFLAGS_COMMON) $(DEF_BACKOFF) -O1 -g -fsanitize=address -fno-omit-frame-pointer $(ATOMIC_LIB)
 
 # ==========================================
 # Targets Definition
@@ -95,7 +109,8 @@ run-stress: dirs $(STRESS_BIN)
 
 run-asan: dirs $(ASAN_BIN)
 	@echo ">>> Running ASan Test..."
-	@ulimit -v unlimited && $(ASAN_BIN)
+	# macOS 上 ulimit -v 常常無效或不可設，為了相容性這裡加上 || true
+	@ulimit -v unlimited 2>/dev/null || true && $(ASAN_BIN)
 
 clean:
 	rm -rf $(BIN)
