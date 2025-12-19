@@ -10,7 +10,7 @@ namespace mpmcq::reclaimer
 {
 
 // 每個執行緒最多同時保護 K 個指針 (M&S Queue 的 enqueue/dequeue 最多同時需要 2~3 個)
-constexpr int HP_COUNT_PER_THREAD = 3;
+constexpr int HP_COUNT_PER_THREAD = 2;
 // 觸發掃描的閾值 (越大吞吐量越高，但記憶體佔用越多)
 constexpr int HP_RETIRE_THRESHOLD = 128; 
 

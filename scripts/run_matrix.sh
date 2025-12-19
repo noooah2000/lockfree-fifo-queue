@@ -16,6 +16,7 @@ rm -f "$OUT_DIR"/*.csv
 
 # 參數設定
 impls=("hp" "ebr" "none" "mutex")
+fixed_thread=8
 threads=(1 2 3 4 5 6 7 8 9 10 11) 
 fixed_payload=3        
 payloads=(0 1 2 3 4 5 6)
@@ -89,7 +90,7 @@ for (( run=1; run<=RUNS; run++ )); do
             
             # 執行一次
             "$MAIN_BIN" --impl "$impl" \
-                   --producers 8 --consumers 8 \
+                   --producers "$fixed_thread" --consumers "$fixed_thread" \
                    --payload-us "$p" \
                    --duration "$duration" --warmup "$warmup" \
                    --csv "$csv"
