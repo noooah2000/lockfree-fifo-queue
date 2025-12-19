@@ -9,8 +9,16 @@
 
 namespace mpmcq::reclaimer 
 {
+
+// Threshold to trigger a global epoch scan attempt.
 constexpr int EBR_RETIRE_THRESHOLD = 512;
 
+/**
+ * @brief Singleton manager for Epoch-Based Reclamation (EBR).
+ * * This class coordinates the global epoch and manages thread-local contexts.
+ * It implements a standard 3-epoch system (Current, Previous, Safe) to ensure
+ * memory safety in lock-free data structures.
+ */
 class EpochBasedReclaimationManager 
 {
 public:
@@ -28,17 +36,19 @@ public:
 
     struct ThreadContext 
     {
-        // 讓 in_critical 和 local_epoch 處於不同的 Cache Line 避免 False Sharing
+        // Align to cache-line (64 bytes) to prevent false sharing between 
+        // local_epoch and in_critical flag, which are frequently accessed.
         alignas(64) std::atomic<size_t> local_epoch{0};
         alignas(64) std::atomic<bool> in_critical{false};
         
+        // 3-Epoch buffer: [0]..[2] correspond to Current, Previous, and Safe buckets.
         std::vector<RetiredNode> retire_lists[3];
         EpochBasedReclaimationManager* manager = nullptr;
 
         ThreadContext(EpochBasedReclaimationManager& central_reclaimer) : manager(&central_reclaimer) 
         {
             manager->register_thread(this);
-            // 預先分配空間，減少 vector 擴展的開銷
+            // Pre-allocate memory to minimize dynamic resizing overhead during runtime.
             for(int i=0; i<3; ++i) retire_lists[i].reserve(EBR_RETIRE_THRESHOLD * 2);
         }
 
@@ -47,6 +57,7 @@ public:
             if (manager) 
             {
                 manager->unregister_thread(this);
+                // Clean up any remaining retired nodes to prevent memory leaks upon thread exit.
                 for (int i = 0; i < 3; ++i) 
                 {
                     for (auto& node : retire_lists[i]) node.deleter(node.ptr);
@@ -62,20 +73,28 @@ public:
         return ctx;
     }
 
+    /**
+     * @brief Mark the current thread as active in a critical section.
+     * * Updates the local epoch to match the global epoch and sets the
+     * active flag. This prevents the global epoch from advancing past
+     * this thread's view of the world.
+     */
     void enter_critical() noexcept 
     {
         auto& ctx = get_context();
-        // 先更新 Epoch
         size_t global_epoch = global_epoch_.load(std::memory_order_relaxed);
         ctx.local_epoch.store(global_epoch, std::memory_order_relaxed);
-        // 再宣告自己 in_critical
         ctx.in_critical.store(true, std::memory_order_seq_cst);
     }
 
+    /**
+     * @brief Mark the current thread as inactive.
+     * * Signals that this thread holds no references to shared memory,
+     * allowing the global epoch to potentially advance.
+     */
     void exit_critical() noexcept 
     {
         auto& ctx = get_context();
-        // 使用 release 即可，不需要 seq_cst
         ctx.in_critical.store(false, std::memory_order_release);
     }
 
@@ -83,51 +102,59 @@ public:
     void retire_node(T* ptr) noexcept 
     {
         auto& ctx = get_context();
-        // 讀取 global epoch 不需要太強的順序
+        // Determine the bucket based on the current global epoch.
         size_t curr_epoch = global_epoch_.load(std::memory_order_relaxed);
         size_t idx = curr_epoch % 3;
 
-        // 1. 建立一個 RetiredNode 結構體實體
+        // 1. Create a type-erased record of the retired node
         RetiredNode node_to_retire;
-        // 2. 設定指標：將具體型別指標轉為通用 void* 存入
         node_to_retire.ptr = static_cast<void*>(ptr);
-        // 3. 設定 Deleter：明確定義如何將 void* 轉回 T* 並執行 delete
-        node_to_retire.deleter = [](void* p) {delete static_cast<T*>(p);};
-        // 4. 將設定好的包裹存入對應世代的垃圾桶
+        
+        // 2. Define the deleter to correctly cast back and delete later
+        node_to_retire.deleter = [](void* p) { delete static_cast<T*>(p); };
+        
+        // 3. Add to the local retirement list for the current epoch
         ctx.retire_lists[idx].push_back(node_to_retire);
 
+        // 4. Trigger a scan attempt if the buffer exceeds the threshold
         if (ctx.retire_lists[idx].size() > EBR_RETIRE_THRESHOLD) 
         {
             scan_and_retire();
         }
     }
 
+    // Manually signal a quiescent state (checkpoint), mostly for testing or specific algorithms.
     void quiescent_state() noexcept 
     {
         auto& ctx = get_context();
-        // 更新 epoch 讓別人知道我活著且推進了
         size_t global_epoch = global_epoch_.load(std::memory_order_relaxed);
         ctx.local_epoch.store(global_epoch, std::memory_order_release);
         scan_and_retire();
     }
 
+    /**
+     * @brief Attempt to advance the global epoch and reclaim memory.
+     * * This function checks if all active threads have caught up to the current
+     * global epoch. If so, it advances the global epoch, effectively making
+     * the "safe" bucket available for deletion.
+     */
     void scan_and_retire() noexcept 
     {
-        // 如果有人正在掃描，我們就不掃了，直接返回。這避免了所有執行緒卡在這裡排隊。
+        // Non-blocking lock attempt. If another thread is scanning, we skip.
+        // This prevents the "convoy effect" where threads queue up to reclaim memory.
         std::unique_lock<std::mutex> lock(list_mtx_, std::try_to_lock);
         if (!lock.owns_lock()) return;
 
         size_t snapshot_epoch = global_epoch_.load(std::memory_order_acquire);
         bool can_advance = true;
         
-        // 遍歷所有執行緒檢查 Epoch
+        // Iterate through all registered threads to check their epochs
         for (ThreadContext* ctx : thread_registry_) 
         {
-            // 載入 in_critical 狀態
             bool t_in_critical = ctx->in_critical.load(std::memory_order_acquire);
             if (t_in_critical) 
             {
-                // 如果活躍，檢查他的 epoch 是否落後
+                // If the thread is active, ensure its epoch matches the snapshot.
                 size_t t_epoch = ctx->local_epoch.load(std::memory_order_acquire);
                 if (t_epoch != snapshot_epoch) 
                 {
@@ -142,32 +169,22 @@ public:
             size_t next_epoch = snapshot_epoch + 1;
             global_epoch_.store(next_epoch, std::memory_order_release);
             
-            // 既然我們持有鎖，且我們是負責推進 Epoch 的人
-            // 這裡其實可以順便幫自己清理一下，但為了簡單，
-            // 還是讓各個執行緒下次 retire 時自己清理
+            // Note: Actual deletion happens in attempt_local_cleanup() by individual threads.
         }
-        
-        // 離開函式時自動解鎖
-        // 額外清理：既然我們拿到了鎖，且可能推進了 Epoch
-        // 我們可以嘗試清理「當前執行緒」的 Safe List
-        // (注意：這裡只清理自己的，因為 ThreadContext 是 thread_local 的)
-        // 為了安全存取自己的 ThreadContext，我們需要重新獲取引用
-        // 但這裡在靜態函式有點麻煩，所以保持原樣，
-        // 讓各執行緒下次呼叫 retire_node 時，透過下面的邏輯清理。
     }
 
-    // 補充：在 scan 之外，我們也應該嘗試清理 safe list
-    // 這樣即使沒搶到鎖，也能回收記憶體
+    /**
+     * @brief Opportunistic cleanup of the safe epoch bucket.
+     * * This allows threads to reclaim memory locally even if they failed to 
+     * acquire the lock for a full scan, provided the global epoch has advanced.
+     */
     void attempt_local_cleanup() 
     {
         size_t snapshot_epoch = global_epoch_.load(std::memory_order_relaxed);
-        // Safe bucket is (current + 1) % 3? No.
-        // If global is e, then e is Current.
-        // e-1 (Previous) might still be in use by lagging threads.
-        // e-2 (Safe) is definitely safe.
-        // 數學上: (snapshot_epoch + 1) % 3 是 Safe 的
-        // 舉例：G=2. Current=2, Prev=1, Safe=0. (2+1)%3 = 0. 正確。
         
+        // Calculate the index of the "Safe" bucket.
+        // In a 3-epoch system (Current=e, Prev=e-1, Safe=e-2), 
+        // the math (e + 1) % 3 correctly points to the Safe bucket index.
         size_t safe_idx = (snapshot_epoch + 1) % 3;
         auto& ctx = get_context();
         
@@ -203,7 +220,12 @@ private:
     }
 };
 
+/**
+ * @brief Public Interface for Epoch-Based Reclamation.
+ * * Complies with the standard Reclaimer concept used in LockFreeQueue.
+ */
 struct epoch_based_reclamation {
+    // RAII wrapper for Critical Section management
     struct token 
     {
         ~token() 
@@ -228,12 +250,16 @@ struct epoch_based_reclamation {
     {
         auto& central_reclaimer = EpochBasedReclaimationManager::instance();
         central_reclaimer.retire_node(p);
-        // 每次 retire 時，順便嘗試清理本地的 safe list
-        // 這樣即使 scan 失敗（沒搶到鎖），只要 Global Epoch 被別人推動了，我就能回收
+        
+        // Opportunistically try to clean up the safe list.
+        // Even if scan_and_retire() failed (lock busy), we can still recycle 
+        // if the global epoch was advanced by another thread.
         central_reclaimer.attempt_local_cleanup(); 
     }
 
-    static void protect_at(int, void*) {}   // 對齊 HP 實作
+    // No-op: EBR does not require per-pointer protection like Hazard Pointers.
+    // Kept for API compatibility with LockFreeQueue.
+    static void protect_at(int, void*) {}   
 };
 
 } // namespace mpmcq::reclaimer

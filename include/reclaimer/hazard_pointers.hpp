@@ -9,12 +9,19 @@
 namespace mpmcq::reclaimer
 {
 
-// 每個執行緒最多同時保護 K 個指針 (M&S Queue 的 enqueue/dequeue 最多同時需要 2~3 個)
+// Maximum number of hazard pointers a single thread can hold simultaneously.
+// For standard M&S Queue operations (enqueue/dequeue), 2-3 pointers are sufficient.
 constexpr int HP_COUNT_PER_THREAD = 2;
-// 觸發掃描的閾值 (越大吞吐量越高，但記憶體佔用越多)
+
+// Threshold for triggering a garbage collection scan.
+// Larger values improve throughput by batching work but increase peak memory usage.
 constexpr int HP_RETIRE_THRESHOLD = 128; 
 
-// Hazard Pointer Record (每個執行緒擁有一份，但掛在全域鏈表上)
+// ==========================================
+// Hazard Pointer Record
+// ==========================================
+// A structure allocated for each thread to publish the pointers it is currently accessing.
+// These records are linked in a global list but owned by individual threads.
 struct alignas(64) HPRecType 
 {
     std::atomic<void*> hp[HP_COUNT_PER_THREAD];
@@ -30,6 +37,11 @@ struct alignas(64) HPRecType
     }
 };
 
+/**
+ * @brief Singleton manager for Hazard Pointers.
+ * * This class manages the lifecycle of Hazard Pointer Records (HPRecType)
+ * and orchestrates the scanning and reclamation process.
+ */
 class HazardPointerManager
 {
 public:
@@ -39,17 +51,17 @@ public:
         return central_reclaimer;
     }
 
-    // 待回收節點的封裝
+    // Type-erased wrapper for a node that is ready to be deleted.
     struct RetiredNode 
     {
         void* ptr;
-        void (*deleter)(void*); // 存儲刪除函數，確保能呼叫到 Object Pool 的 operator delete
+        void (*deleter)(void*); // Function pointer to ensure correct destruction (handling Object Pool)
     };
 
-    // 每個執行緒的本地上下文
+    // Thread-local context to cache the acquired HP record and retired nodes.
     struct ThreadContext
     {
-        HPRecType* my_rec = nullptr;    // 指向全域鏈表中的自己的 Record
+        HPRecType* my_rec = nullptr;    // Pointer to this thread's global record
         std::vector<RetiredNode> retire_list; 
 
         ThreadContext(HazardPointerManager& central_reclaimer) 
@@ -61,10 +73,9 @@ public:
         {
             if (my_rec) 
             {
-                // 執行緒結束時，釋放 Record 讓別人用
-                // 注意：這裡我們不清理 retire_list，嚴格來說這些垃圾會洩漏。
-                // 在正式實作中應該把這些節點轉移到全域孤兒列表 (Global Orphan List)。
-                // 但為了作業專案的複雜度控制，我們允許這裡的小量洩漏。
+                // Upon thread exit, release the record for reuse.
+                // Note: Ideally, we should move remaining nodes in retire_list to a global orphan list.
+                // For simplicity in this implementation, we allow a small leak here.
                 if (!retire_list.empty()) 
                 {
                     HazardPointerManager::instance().scan_and_retire(); 
@@ -80,17 +91,23 @@ public:
         return ctx;
     }
 
-    // 1. 設置保護 (公告天下我正在讀 ptr)
+    /**
+     * @brief Publish a pointer to be protected.
+     * * This announces to all other threads: "I am reading this pointer, do not delete it."
+     * * @param idx The index slot in the HP array (0 to HP_COUNT_PER_THREAD-1).
+     * @param ptr The raw pointer address to protect.
+     */
     void protect(int idx, void *ptr) noexcept
     {
         auto &ctx = get_context();
         if (idx < HP_COUNT_PER_THREAD)
         {
+            // Use seq_cst to ensure the publication is visible before reading the node's data.
             ctx.my_rec->hp[idx].store(ptr, std::memory_order_seq_cst);
         }
     }
 
-    // 2. 清除保護
+    // Clear a protection slot.
     void clear(int idx) noexcept
     {
         auto &ctx = get_context();
@@ -100,7 +117,11 @@ public:
         }
     }
 
-    // 3. 登記退休 (放入本地緩衝區)
+    /**
+     * @brief Mark a node for retirement.
+     * * The node is added to a thread-local buffer. Actual deletion is deferred
+     * until the buffer is full and a scan confirms no other thread is using it.
+     */
     template <typename T>
     void retire_node(T *ptr) noexcept
     {
@@ -108,7 +129,7 @@ public:
 
         RetiredNode node_to_retire;
         node_to_retire.ptr = static_cast<void*>(ptr);
-        node_to_retire.deleter = [](void* p) {delete static_cast<T*>(p);};
+        node_to_retire.deleter = [](void* p) { delete static_cast<T*>(p); };
         ctx.retire_list.push_back(node_to_retire);
 
         if (ctx.retire_list.size() >= HP_RETIRE_THRESHOLD)
@@ -117,49 +138,52 @@ public:
         }
     }
 
-    // 4. 掃描與回收 (核心演算法)
+    /**
+     * @brief The core reclamation algorithm (Scan).
+     * * 1. Collect all hazard pointers currently published by all threads.
+     * 2. Sort them for fast lookup.
+     * 3. Iterate through the local retirement list:
+     * - If a node is in the hazard list, keep it (someone is using it).
+     * - If not, safe to delete.
+     */
     void scan_and_retire() noexcept
     {
         auto &ctx = get_context();
         
-        // 階段一：收集所有其他執行緒的 Hazard Pointers
+        // Phase 1: Collect Hazard Pointers from all threads
         std::vector<void*> hazards;
-        // 預估容量，避免頻繁 alloc
         hazards.reserve(HP_COUNT_PER_THREAD * 16); 
 
-        // 遍歷全域鏈表 (這是一個簡單的 Lock-Free 遍歷，因為我們只append不delete節點)
+        // Iterate through the global linked list of HP records.
+        // This is safe because we never delete HPRecType nodes, only add them.
         HPRecType* curr_rec = head_rec_.load(std::memory_order_acquire);
         while (curr_rec) {
             if (curr_rec->is_acquired.load(std::memory_order_acquire)) 
             {
                 for (int i = 0; i < HP_COUNT_PER_THREAD; ++i) 
                 {
-                    // 如果缺少中間的 Fence (或 seq_cst 操作)，
-                    // Reader 可能先讀取 Head 確認有效，然後才公告 HP。
-                    // 而在這微小的時間差內，Reclaimer 可能已經讀取了 HP (發現沒人看) 並刪除了節點。
-                    // 加上 atomic_thread_fence (即seq_cst) 後，這種重排被物理禁止，確保了正確性。
-
-                    // Jay: 可能不用 seq_cst，待驗證
-                    //      可能 "非 x86" 平台需要
+                    // Note on Memory Ordering:
+                    // acquire ensures we see the latest value published by the reader.
+                    // On non-x86 architectures (ARM/PowerPC), seq_cst fences might be 
+                    // required here and in protect() to strictly order the "publish HP" 
+                    // vs "retire Node" sequence. For x86, acquire/release is often sufficient.
                     void* p = curr_rec->hp[i].load(std::memory_order_acquire);
-                    // void* p = curr_rec->hp[i].load(std::memory_order_seq_cst);
                     if (p) hazards.push_back(p);
                 }
             }
             curr_rec = curr_rec->next;
         }
 
-        // 階段二：排序，以便二分搜尋
+        // Phase 2: Sort for binary search
         std::sort(hazards.begin(), hazards.end());
 
-        // 階段三：過濾 retire_list
-        // 我們將需要保留的節點移到 vector 前端，最後一次 truncate
+        // Phase 3: Check retirement list against hazards
         std::vector<RetiredNode>& list = ctx.retire_list;
         
         size_t kept_count = 0;
         for (size_t i = 0; i < list.size(); ++i) 
         {
-            // 如果此節點存在於 hazards 中 -> 不能刪 -> 保留
+            // If pointer exists in hazards -> cannot delete -> keep it.
             if (std::binary_search(hazards.begin(), hazards.end(), list[i].ptr)) 
             {
                 if (i != kept_count) 
@@ -170,19 +194,19 @@ public:
             } 
             else 
             {
-                // 沒人看 -> 安全 -> 刪除 (歸還給 Pool)
+                // No one is watching -> Safe to delete -> Return to Pool
                 list[i].deleter(list[i].ptr);
             }
         }
         
-        // 縮小 vector 大小，移除已刪除的元素
+        // Remove deleted elements from the vector
         list.resize(kept_count);
     }
 
-    // 輔助：申請一個 HP Record (重複利用或新增)
+    // Helper: Acquire an HP Record (reuse existing or create new)
     HPRecType* acquire_record() 
     {
-        // 1. 嘗試在鏈表中找一個沒在用的 (is_acquired == false)
+        // 1. Try to find a free record in the existing list
         HPRecType* curr_rec = head_rec_.load(std::memory_order_acquire);
         while (curr_rec) 
         {
@@ -199,12 +223,12 @@ public:
             curr_rec = curr_rec->next;
         }
 
-        // 2. 沒找到，new 一個新的並掛到鏈表頭部
-        // 注意：這裡會有微小的記憶體洩漏 (Rec 節點本身只增不減)，但這在 HP 算法中是標準做法
+        // 2. No free record found, allocate a new one and prepend to list
+        // Note: HP records are never deleted, which is standard for this algorithm.
         HPRecType* new_rec = new HPRecType();
         new_rec->is_acquired.store(true, std::memory_order_relaxed);
         
-        // CAS Loop 插入鏈表頭
+        // CAS Loop to insert at head
         HPRecType* old_head = head_rec_.load(std::memory_order_relaxed);
         do {
             new_rec->next = old_head;
@@ -215,15 +239,15 @@ public:
         return new_rec;
     }
 
-    // 輔助：釋放 Record (標記為不活躍)
+    // Helper: Release a record back to the pool (mark as not acquired)
     void release_record(HPRecType* rec) 
     {
-        // 清空指針
+        // Clear all pointers
         for (int i = 0; i < HP_COUNT_PER_THREAD; ++i)
         {
             rec->hp[i].store(nullptr, std::memory_order_release);
         }
-        // 標記為可重用
+        // Mark as free
         rec->is_acquired.store(false, std::memory_order_release);
     }
 
@@ -232,16 +256,17 @@ private:
     HazardPointerManager() = default;
 };
 
-// 用戶端接口
+/**
+ * @brief Public Interface for Hazard Pointer Reclamation.
+ * * Complies with the Reclaimer concept required by LockFreeQueue.
+ */
 struct hazard_pointers
 {
     struct token { };
 
-    // 為了相容 Benchmark 的介面，這裡也實作 quiescent
-    // 在 HP 中，quiescent 通常意味著 "嘗試回收所有積壓垃圾"
+    // API Compatibility: Performs a manual scan attempt.
     static void quiescent() noexcept
     {
-        // 簡單做一次掃描
         HazardPointerManager::instance().scan_and_retire();
     }
 
@@ -253,7 +278,7 @@ struct hazard_pointers
         HazardPointerManager::instance().retire_node(p);
     }
 
-    // 核心功能：設置 Hazard Pointer
+    // Core functionality: Protect a pointer at a specific index.
     static void protect_at(int idx, void *ptr) noexcept
     {
         if (ptr) HazardPointerManager::instance().protect(idx, ptr);
