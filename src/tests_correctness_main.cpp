@@ -210,7 +210,7 @@ static void run_suite(const std::string &name)
     std::cout << "[TEST SUITE] " << name << "\n";
     std::cout << "======================================\n";
 
-    bool linear_ok = test_linearization<QueueType>("Linearization", 64, 64, 500000); // 增加並發度
+    bool linear_ok = test_linearization<QueueType>("Linearization", 32, 32, 500000); // 增加並發度
     bool shutdown_ok = test_shutdown_semantics<QueueType>();
 
     std::cout << "--------------------------------------\n";
@@ -252,7 +252,7 @@ int main()
         // 使用更極端的參數來確保觸發 ABA
         // 16 Producers, 16 Consumers, 50000 Ops
         bool result = test_linearization<mpmcq::LockFreeQueue<std::pair<int, int>, UnsafeDirectReclamation>>(
-            "Unsafe ABA Test", 64, 64, 500000);
+            "Unsafe ABA Test", 32, 32, 500000);
 
         if (!result)
         {

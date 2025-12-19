@@ -352,7 +352,7 @@ def main():
         plot_throughput_scalability(data, p_load)
         plot_producer_throughput_scalability(data, p_load) # 新增
         plot_latency_scalability(data, p_load)
-        plot_latency_distribution(data, p_load, p_threads)
+        plot_latency_distribution(data, p_load)
         plot_memory_scalability(data, p_load)
         plot_max_depth_scalability(data, p_load)
     
