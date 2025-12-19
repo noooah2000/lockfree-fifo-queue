@@ -1,164 +1,164 @@
 # Lock-free MPMC FIFO Queue (HP/EBR/None) + Mutex Baseline
 
-基於 **Michael & Scott 演算法** 的 Multi-Producer/Multi-Consumer (MPMC) 無鎖佇列實作。
-本專案專注於解決 Lock-Free 資料結構在 C++ 環境下的 **記憶體回收 (SMR)** 與 **效能擴展性** 問題。
+A Multi-Producer/Multi-Consumer (MPMC) lock-free queue implementation based on the **Michael & Scott algorithm**.
+This project focuses on solving **memory reclamation (SMR)** and **performance scalability** issues for lock-free data structures in C++ environments.
 
-我們實作了多種記憶體回收策略，並引入了 **Object Pool**、**False Sharing Prevention** 與 **Exponential Backoff** 等優化技術，在真實負載下展現出優於傳統 Mutex 的效能。
+We implement multiple memory reclamation strategies and introduce optimizations like **Object Pool**, **False Sharing Prevention**, and **Exponential Backoff**, demonstrating superior performance over traditional mutex-based queues under real workloads.
 
-## 核心功能與策略
+## Core Features and Strategies
 
 - **Core Algorithm**: Michael & Scott Non-blocking Queue
 - **Memory Reclamation (SMR)**:
-  - `epoch_based_reclamation` (**EBR**): 基於 Epoch 的回收機制，適合高吞吐量場景。
-  - `hazard_pointers` (**HP**): 經典的 Hazard Pointer 實作，提供最強的無鎖保證 (Wait-free readers)。
-  - `no_reclamation` (**None**): 用於基準測試的對照組 (Unsafe)。
-- **Baseline**: `mutex_queue` (基於 `std::queue` + `std::mutex`)
+  - `epoch_based_reclamation` (**EBR**): Epoch-based reclamation mechanism, suitable for high-throughput scenarios.
+  - `hazard_pointers` (**HP**): Classic Hazard Pointer implementation, providing the strongest lock-free guarantees (wait-free readers).
+  - `no_reclamation` (**None**): Control group for benchmarking (Unsafe).
+- **Baseline**: `mutex_queue` (based on `std::queue` + `std::mutex`)
 
-## 🚀 關鍵效能優化 (Technical Innovations)
+## 🚀 Key Performance Optimizations (Technical Innovations)
 
-為了突破 Lock-Free 的物理瓶頸，我們引入了以下優化：
+To break through the physical bottlenecks of lock-free structures, we introduce the following optimizations:
 
-### 1. Lock-Free Object Pool (記憶體池)
+### 1. Lock-Free Object Pool (Memory Pool)
 - **Flag**: `LFQ_USE_NODEPOOL=1`
-- **問題**: 標準 `new/delete` 在多執行緒下會觸發 System Allocator 的 Global Lock，導致 Lock-Free Queue 實際上卡在 Malloc 鎖上。
-- **解法**: 實作了 `Thread-Local Node Cache`。
-  - **Overloading**: 重載了 `Node` 的 `operator new/delete`，使 SMR 機制無痛整合 Object Pool。
-  - **Batch Size**: 一次與全域池交換 128 個節點，減少鎖競爭。
-  - **Local Capacity**: 每個執行緒本地緩衝區容量 512 個節點。
-  - **效果**: 大幅減少 `malloc` 呼叫，並提升 Cache Locality。
+- **Problem**: Standard `new/delete` triggers the System Allocator's Global Lock in multi-threaded environments, causing lock-free queues to bottleneck on malloc locks.
+- **Solution**: Implemented `Thread-Local Node Cache`.
+  - **Overloading**: Overloaded `Node`'s `operator new/delete` for seamless Object Pool integration with SMR mechanisms.
+  - **Batch Size**: Exchange 128 nodes with the global pool at once to reduce lock contention.
+  - **Local Capacity**: Each thread's local buffer capacity is 512 nodes.
+  - **Effect**: Significantly reduces `malloc` calls and improves Cache Locality.
 
-### 2. 防止 False Sharing (偽共享)
-- **問題**: `Head` 和 `Tail` 指標若位於同一 Cache Line，會導致核心間頻繁的 Cache Invalidation (Ping-pong effect)。
-- **解法**: 使用 `alignas(64)` 強制對齊 CPU Cache Line。
+### 2. False Sharing Prevention
+- **Problem**: `Head` and `Tail` pointers in the same Cache Line cause frequent Cache Invalidation (ping-pong effect) between cores.
+- **Solution**: Use `alignas(64)` to force alignment to CPU Cache Line boundaries.
 
-### 3. Exponential Backoff (指數退避)
+### 3. Exponential Backoff
 - **Flag**: `LFQ_USE_BACKOFF=1`
-- **問題**: 在高競爭 (High Contention) 下，頻繁的 CAS 失敗會導致匯流排飽和 (Bus Storm)，降低總吞吐量。
-- **解法**: 引入指數退避機制，在 CAS 失敗時暫停 CPU (使用 `_mm_pause` 或 `yield`)，緩解匯流排壓力。
-  - **Max Yield**: 最大等待次數 512，超過則使用 `std::this_thread::yield()`。
+- **Problem**: Frequent CAS failures under high contention lead to bus saturation (Bus Storm), reducing overall throughput.
+- **Solution**: Introduce exponential backoff, pausing CPU (using `_mm_pause` or `yield`) on CAS failure to alleviate bus pressure.
+  - **Max Yield**: Maximum wait cycles of 512, then use `std::this_thread::yield()`.
 
-### 4. 記憶體順序優化 (Memory Ordering)
-- **解法**: 將原本保守的 `memory_order_seq_cst` 優化為 `acquire/release` 語意，減少 CPU 的 Memory Fence 開銷。
+### 4. Memory Ordering Optimization
+- **Solution**: Optimize from conservative `memory_order_seq_cst` to `acquire/release` semantics, reducing CPU Memory Fence overhead.
 
-### 5. Address Sanitizer (ASan) 支援
-- **功能**: 自動偵測 ASan 並啟用 Poisoning 機制。
-- **Poisoning**: 回收的節點會被標記為 "有毒"，防止 Use-After-Free。
-- **Unpoisoning**: 分配的節點會被解除毒性，允許正常存取。
-- **巨集**: `ASAN_POISON_NODE(ptr, size)` 和 `ASAN_UNPOISON_NODE(ptr, size)`。
+### 5. Address Sanitizer (ASan) Support
+- **Feature**: Auto-detect ASan and enable Poisoning mechanism.
+- **Poisoning**: Reclaimed nodes are marked as "poisoned" to prevent Use-After-Free.
+- **Unpoisoning**: Allocated nodes are unpoisoned to allow normal access.
+- **Macros**: `ASAN_POISON_NODE(ptr, size)` and `ASAN_UNPOISON_NODE(ptr, size)`.
 
 ## Build & Run
 
-本專案支援透過 Makefile 參數進行特性開關，方便進行研究。
+This project supports feature toggles via Makefile parameters for research purposes.
 
 ```bash
-# 1. 標準編譯 (僅基礎實作，無額外優化)
-# 適合用來觀察未優化前的瓶頸
+# 1. Standard compilation (basic implementation only, no extra optimizations)
+# Suitable for observing bottlenecks before optimization
 make clean && make ENABLE_POOL=0 ENABLE_BACKOFF=0 -j
 
-# 2. 開啟關鍵優化
-# ENABLE_POOL=1    : 啟用 Thread-Local Object Pool (解決 malloc 鎖瓶頸)
-# ENABLE_BACKOFF=1 : 啟用 Exponential Backoff (解決匯流排競爭)
+# 2. Enable key optimizations
+# ENABLE_POOL=1    : Enable Thread-Local Object Pool (solves malloc lock bottleneck)
+# ENABLE_BACKOFF=1 : Enable Exponential Backoff (solves bus contention)
 make clean && make ENABLE_POOL=1 ENABLE_BACKOFF=1 -j
 
-# 3. 執行正確性測試
+# 3. Run correctness tests
 make run-stress
 
-# 4. 執行效能基準測試
-# 範例: 使用 EBR 策略, 4P/4C, Payload 2us
+# 4. Run performance benchmarks
+# Example: Using EBR strategy, 4P/4C, Payload 2us
 ./build/stress_test_pool_backoff --impl ebr --producers 4 --consumers 4 --payload-us 2
 ```
 
-### 建構選項詳解
+### Build Options Details
 
-Makefile 支援以下巨集定義：
-- `LFQ_USE_NODEPOOL`: 啟用 Object Pool (預設關閉)
-- `LFQ_USE_BACKOFF`: 啟用 Exponential Backoff (預設關閉)
+Makefile supports the following macro definitions:
+- `LFQ_USE_NODEPOOL`: Enable Object Pool (disabled by default)
+- `LFQ_USE_BACKOFF`: Enable Exponential Backoff (disabled by default)
 
-編譯後會產生多個執行檔：
-- `build/bench_queue_nopool_nobackoff`: 基準測試 (無優化)
-- `build/bench_queue_pool_nobackoff`: 僅啟用 Pool
-- `build/bench_queue_nopool_backoff`: 僅啟用 Backoff  
-- `build/bench_queue_pool_backoff`: 啟用所有優化
-- `build/stress_test_pool_backoff`: 正確性測試 (預設啟用 Pool+Backoff)
-- `build/asan_test`: ASan 記憶體檢查版本
+After compilation, multiple executables are generated:
+- `build/bench_queue_nopool_nobackoff`: Benchmark (no optimizations)
+- `build/bench_queue_pool_nobackoff`: Pool only
+- `build/bench_queue_nopool_backoff`: Backoff only  
+- `build/bench_queue_pool_backoff`: All optimizations enabled
+- `build/stress_test_pool_backoff`: Correctness test (Pool+Backoff enabled by default)
+- `build/asan_test`: ASan memory check version
 
-## 實現詳細說明
+## Implementation Details
 
 ### 1. Epoch-Based Reclamation (EBR)
-- **位置**: `include/reclaimer/epoch_based_reclamation.hpp`
-- **機制**: 
-  - 維護全域 `Global Epoch` 與每執行緒 `Local Epoch`。
-  - 採用 **QSBR (Quiescent-State-Based Reclamation)** 精神。
-  - **優化**: 
-    - 採用 `try_lock` 進行回收掃描，避免多執行緒在回收邏輯上排隊 (Non-blocking reclamation)。
-    - 批次回收閾值設為 512，均攤掃描開銷。
+- **Location**: `include/reclaimer/epoch_based_reclamation.hpp`
+- **Mechanism**: 
+  - Maintains global `Global Epoch` and per-thread `Local Epoch`.
+  - Adopts **QSBR (Quiescent-State-Based Reclamation)** principles.
+  - **Optimizations**: 
+    - Uses `try_lock` for reclamation scans to avoid multi-thread queuing in reclamation logic (Non-blocking reclamation).
+    - Batch reclamation threshold set to 512 to amortize scan overhead.
 
 ### 2. Hazard Pointers (HP)
-- **位置**: `include/reclaimer/hazard_pointers.hpp`
-- **機制**: 
-  - 每個執行緒維護 `K` 個 Hazard Pointers (通常 K=2 for M&S Queue)。
-  - Dequeue 時標記 `Head`，防止被其他執行緒回收。
-  - **特性**: 只有在確認無任何 Hazard Pointer 指向該節點時才回收。
+- **Location**: `include/reclaimer/hazard_pointers.hpp`
+- **Mechanism**: 
+  - Each thread maintains `K` Hazard Pointers (typically K=2 for M&S Queue).
+  - Marks `Head` during dequeue to prevent reclamation by other threads.
+  - **Feature**: Only reclaims nodes when confirmed no Hazard Pointers point to them.
 
 ### 3. Object Pool Integration
-- **位置**: `include/queue/lockfree_queue.hpp`
-- **設計**:
-  - `Node` 結構體重載了 `operator new` 與 `operator delete`。
-  - SMR 模組 (EBR/HP) 呼叫 `delete node` 時，會自動導向 `NodePool::free()` 而非系統 `free()`。
+- **Location**: `include/queue/lockfree_queue.hpp`
+- **Design**:
+  - `Node` struct overloads `operator new` and `operator delete`.
+  - When SMR modules (EBR/HP) call `delete node`, it automatically routes to `NodePool::free()` instead of system `free()`.
 
-## 效能分析與預期結果
+## Performance Analysis and Expected Results
 
-根據我們的實驗 (詳見報告)：
-1.  **極低負載 (0us Payload)**: 
-    - 由於 `std::deque` (Mutex底層) 擁有極佳的連續記憶體佈局 (Cache Locality)，在此極端場景下 Mutex 版本可能略快於 Linked-List 結構的 Lock-Free Queue。
-2.  **真實負載 (>= 3us Payload)**:
-    - Lock-Free 版本展現出較佳的擴展性 (Scalability)，吞吐量顯著超越 Mutex 版本。
+Based on our experiments (see report for details):
+1.  **Very Low Load (0us Payload)**: 
+    - Due to `std::deque` (underlying Mutex) having excellent contiguous memory layout (Cache Locality), Mutex version may be slightly faster than Linked-List based Lock-Free Queue in this extreme scenario.
+2.  **Real Load (>= 3us Payload)**:
+    - Lock-Free versions show better scalability, with throughput significantly exceeding Mutex versions.
 
-## 測試與基準測試
+## Testing and Benchmarking
 
-### 正確性測試
-- **命令**: `make run-stress`
-- **內容**: 
-  - 線性一致性檢查 (Per-Producer FIFO)
-  - 關閉語意測試
-  - ABA 問題演示 (使用 UnsafeDirectReclamation)
+### Correctness Tests
+- **Command**: `make run-stress`
+- **Content**: 
+  - Linearizability checks (Per-Producer FIFO)
+  - Shutdown semantics tests
+  - ABA problem demonstration (using UnsafeDirectReclamation)
 
-### 效能基準測試
-- **命令**: `./build/stress_test_pool_backoff --impl [hp|ebr|none|mutex] --producers P --consumers C --payload-us N`
-- **指標**:
-  - 吞吐量 (Producer/Consumer ops/sec)
-  - 延遲分位數 (P50, P99, P99.9, Max)
-  - 記憶體峰值使用量
-  - 隊列最大深度
+### Performance Benchmarks
+- **Command**: `./build/stress_test_pool_backoff --impl [hp|ebr|none|mutex] --producers P --consumers C --payload-us N`
+- **Metrics**:
+  - Throughput (Producer/Consumer ops/sec)
+  - Latency percentiles (P50, P99, P99.9, Max)
+  - Peak memory usage
+  - Maximum queue depth
 
-### 繪圖腳本
-- **位置**: `scripts/plot_results.py`
-- **功能**: 從 CSV 結果生成效能比較圖表
+### Plotting Script
+- **Location**: `scripts/plot_results.py`
+- **Function**: Generate performance comparison charts from CSV results
 
-## 使用範例
+## Usage Example
 
 ```cpp
 #include "queue/lockfree_queue.hpp"
 #include "reclaimer/epoch_based_reclamation.hpp"
 
-// 定義一個使用 EBR 的佇列
+// Define a queue using EBR
 using EBRQueue = mpmcq::LockFreeQueue<int, mpmcq::reclaimer::epoch_based_reclamation>;
 
 int main() {
     EBRQueue q;
     
-    // 生產者
+    // Producer
     std::thread p([&]{
         q.enqueue(42);
     });
 
-    // 消費者
+    // Consumer
     std::thread c([&]{
         int v;
         if (q.try_dequeue(v)) {
             // Process...
         }
-        // 重要：定期宣告 Quiescent State 以驅動回收
+        // Important: Periodically declare Quiescent State to drive reclamation
         EBRQueue::quiescent(); 
     });
     
@@ -166,26 +166,26 @@ int main() {
 }
 ```
 
-## 文件結構
+## Project Structure
 
 ```
 include/
   queue/
-    lockfree_queue.hpp      # M&S Lock-Free Queue (包含 NodePool, Backoff, ASan)
+    lockfree_queue.hpp      # M&S Lock-Free Queue (with NodePool, Backoff, ASan)
     mutex_queue.hpp         # Mutex-based Baseline
   reclaimer/
-    hazard_pointers.hpp          # Hazard Pointers 策略 (HP_COUNT_PER_THREAD=2)
+    hazard_pointers.hpp          # Hazard Pointers strategy (HP_COUNT_PER_THREAD=2)
     epoch_based_reclamation.hpp  # Epoch-Based Reclamation (EBR_RETIRE_THRESHOLD=512)
-    no_reclamation.hpp           # No Reclamation 策略 (Memory Leak)
+    no_reclamation.hpp           # No Reclamation strategy (Memory Leak)
 
 src/
-  benchmark_main.cpp         # 效能基準測試工具
-  tests_correctness_main.cpp # 正確性測試 (線性一致性, ABA 演示)
+  benchmark_main.cpp         # Performance benchmarking tool
+  tests_correctness_main.cpp # Correctness tests (linearizability, ABA demo)
 
 scripts/
-  plot_results.py           # 結果視覺化腳本
-  run_matrix.sh             # 批量測試腳本
+  plot_results.py           # Result visualization script
+  run_matrix.sh             # Batch testing script
 
-Makefile                    # 建構配置 (支援多種優化組合)
-README.md                   # 本文件
+Makefile                    # Build configuration (supports multiple optimization combinations)
+README.md                   # This file
 ```
