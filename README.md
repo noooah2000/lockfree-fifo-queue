@@ -14,7 +14,7 @@ We implement multiple memory reclamation strategies and introduce optimizations 
   - `no_reclamation` (**None**): Control group for benchmarking (Unsafe).
 - **Baseline**: `mutex_queue` (based on `std::queue` + `std::mutex`)
 
-## 🚀 Key Performance Optimizations (Technical Innovations)
+## Key Performance Optimizations (Technical Innovations)
 
 To break through the physical bottlenecks of lock-free structures, we introduce the following optimizations:
 
@@ -77,7 +77,7 @@ Makefile supports the following macro definitions:
 After compilation, multiple executables are generated:
 - `build/bench_queue_nopool_nobackoff`: Benchmark (no optimizations)
 - `build/bench_queue_pool_nobackoff`: Pool only
-- `build/bench_queue_nopool_backoff`: Backoff only  
+- `build/bench_queue_nopool_backoff`: Backoff only
 - `build/bench_queue_pool_backoff`: All optimizations enabled
 - `build/stress_test_pool_backoff`: Correctness test (Pool+Backoff enabled by default)
 - `build/asan_test`: ASan memory check version
@@ -86,16 +86,16 @@ After compilation, multiple executables are generated:
 
 ### 1. Epoch-Based Reclamation (EBR)
 - **Location**: `include/reclaimer/epoch_based_reclamation.hpp`
-- **Mechanism**: 
+- **Mechanism**:
   - Maintains global `Global Epoch` and per-thread `Local Epoch`.
   - Adopts **QSBR (Quiescent-State-Based Reclamation)** principles.
-  - **Optimizations**: 
+  - **Optimizations**:
     - Uses `try_lock` for reclamation scans to avoid multi-thread queuing in reclamation logic (Non-blocking reclamation).
     - Batch reclamation threshold set to 512 to amortize scan overhead.
 
 ### 2. Hazard Pointers (HP)
 - **Location**: `include/reclaimer/hazard_pointers.hpp`
-- **Mechanism**: 
+- **Mechanism**:
   - Each thread maintains `K` Hazard Pointers (typically K=2 for M&S Queue).
   - Marks `Head` during dequeue to prevent reclamation by other threads.
   - **Feature**: Only reclaims nodes when confirmed no Hazard Pointers point to them.
@@ -109,7 +109,7 @@ After compilation, multiple executables are generated:
 ## Performance Analysis and Expected Results
 
 Based on our experiments (see report for details):
-1.  **Very Low Load (0us Payload)**: 
+1.  **Very Low Load (0us Payload)**:
     - Due to `std::deque` (underlying Mutex) having excellent contiguous memory layout (Cache Locality), Mutex version may be slightly faster than Linked-List based Lock-Free Queue in this extreme scenario.
 2.  **Real Load (>= 3us Payload)**:
     - Lock-Free versions show better scalability, with throughput significantly exceeding Mutex versions.
@@ -118,7 +118,7 @@ Based on our experiments (see report for details):
 
 ### Correctness Tests
 - **Command**: `make run-stress`
-- **Content**: 
+- **Content**:
   - Linearizability checks (Per-Producer FIFO)
   - Shutdown semantics tests
   - ABA problem demonstration (using UnsafeDirectReclamation)
@@ -146,7 +146,7 @@ using EBRQueue = mpmcq::LockFreeQueue<int, mpmcq::reclaimer::epoch_based_reclama
 
 int main() {
     EBRQueue q;
-    
+
     // Producer
     std::thread p([&]{
         q.enqueue(42);
@@ -159,9 +159,9 @@ int main() {
             // Process...
         }
         // Important: Periodically declare Quiescent State to drive reclamation
-        EBRQueue::quiescent(); 
+        EBRQueue::quiescent();
     });
-    
+
     p.join(); c.join();
 }
 ```
